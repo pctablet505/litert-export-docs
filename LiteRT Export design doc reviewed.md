@@ -145,7 +145,6 @@ model.export("model.tflite", format="litert")
 * Single model.export(filepath, format="litert") API across all model types  
 * Automatic handling of complex input structures (dicts or nested dicts converted to lists)  
 * Train on any backend JAX/PyTorch/TensorFlow and export to LiteRT.  
-* Support for AOT compilation targets (optimize for ARM, x86, etc.)  
 * Unified experience across Keras Core and KerasHub models
 
 ### 2.3 Key Challenges
@@ -199,7 +198,7 @@ flowchart TD
     
     B["<b>KERAS-HUB LAYER</b><br/>Domain-specific configuration<br/><br/>• Config classes per model type<br/>(CausalLM, ImageClassifier, Seq2SeqLM, etc.)<br/><br/>• Input signature creation with defaults<br/>(sequence_length for text, image_size for vision)<br/><br/>• Model type detection via get_exporter_config()"]
     
-    C["<b>KERAS CORE LAYER</b><br/>Export mechanics<br/><br/>• Dict input detection and adapter creation<br/><br/>• TFLite conversion<br/>(direct or wrapper-based fallback)<br/><br/>• AOT compilation support"]
+    C["<b>KERAS CORE LAYER</b><br/>Export mechanics<br/><br/>• Dict input detection and adapter creation<br/><br/>• TFLite conversion<br/>(direct or wrapper-based fallback)"]
     
     D["<b>OUTPUT</b><br/><br/>model.tflite (list-based interface)"]
     
@@ -249,8 +248,7 @@ Location: `keras/src/export/litert.py`
 * Infer input signatures from model structure  
 * **Detect and handle dictionary inputs automatically**
 * **Create adapters for dict->list conversion**
-* Convert to TFLite using TensorFlow Lite Converter  
-* Support AOT compilation for hardware optimization
+* Convert to TFLite using TensorFlow Lite Converter
 
 **Export Pipeline:**
 
@@ -262,20 +260,17 @@ flowchart TD
     D["3. If dict inputs: Create adapter<br/>(_create_dict_adapter)<br/>• Create Input layers for list inputs<br/>• Convert list->dict internally<br/>• Wrap original model"]
     E["4. Convert to TFLite<br/>(_convert_to_tflite)<br/>• Try direct conversion first<br/>• Fall back to wrapper-based conversion if needed"]
     F["5. Save .tflite file"]
-    G["6. Optional: AOT compilation<br/>(_aot_compile)"]
     
     A --> B
     B --> C
     C --> D
     D --> E
     E --> F
-    F --> G
     
     style A fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
     style C fill:#fff9c4,stroke:#f57f17,stroke-width:2px
     style D fill:#fff9c4,stroke:#f57f17,stroke-width:2px
     style E fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    style G fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
 ```
 
 ### 4.3 Input Signature Strategy by Model Type
@@ -482,7 +477,7 @@ InputSpec(dtype="float32", shape=(None, height, width, 3), name="inputs")
 
 **Separation of Concerns:** 
 - Keras-Hub: Provides domain knowledge (input signatures with automatic preprocessor defaults)
-- Keras Core: Handles all export mechanics (dict conversion, TFLite compilation, AOT compilation)
+- Keras Core: Handles all export mechanics (dict conversion, TFLite compilation)
 
 ### 4.6 Complete Export Pipeline
 
@@ -494,7 +489,7 @@ flowchart TD
     
     Step2["<b>STEP 2: KERAS-HUB LAYER</b><br/>(configs.py + task.py)<br/><br/>1. Task.export() detects format='litert'<br/><br/>2. Gets config via get_exporter_config(model)<br/><br/>3. Config generates input signature<br/>(auto-uses preprocessor.sequence_length if available)<br/><br/>4. Calls Keras Core export_litert() directly"]
     
-    Step3["<b>STEP 3: KERAS CORE LAYER</b><br/>(keras.src.export.litert)<br/><br/>1. Detects dictionary inputs<br/><br/>2. Creates adapter<br/>Converts dict signature to list-based Functional model<br/><br/>3. Converts to TFLite<br/>(direct or wrapper-based fallback)<br/><br/>4. Saves .tflite file<br/><br/>5. Optional: AOT compilation for target hardware"]
+    Step3["<b>STEP 3: KERAS CORE LAYER</b><br/>(keras.src.export.litert)<br/><br/>1. Detects dictionary inputs<br/><br/>2. Creates adapter<br/>Converts dict signature to list-based Functional model<br/><br/>3. Converts to TFLite<br/>(direct or wrapper-based fallback)<br/><br/>4. Saves .tflite file"]
     
     Step4["<b>STEP 4: OUTPUT</b><br/><br/>1. Dict->list conversion compiled into .tflite<br/>2. No weight duplication (adapter shares variables)<br/>3. No wrapper classes - direct delegation<br/>4. Automatic fallback strategies"]
     

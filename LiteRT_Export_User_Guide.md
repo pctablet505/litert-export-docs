@@ -37,7 +37,7 @@ model.export("model.tflite", format="litert")
 - ✅ **Multi-backend support** - Train with JAX/PyTorch, export to LiteRT
 - ✅ **Automatic dict handling** - Keras-Hub models work out-of-the-box
 - ✅ **Dynamic shapes** - Resize inputs at runtime for flexibility
-- ✅ **Built-in optimization** - Quantization and AOT compilation support
+- ✅ **Built-in optimization** - Quantization support
 
 ### What's Supported
 
@@ -48,7 +48,6 @@ model.export("model.tflite", format="litert")
 | **Input Types** | List, Dict, Nested structures |
 | **Keras-Hub** | All task types (text, vision, multimodal) |
 | **Quantization** | Dynamic range, Full integer, Float16 |
-| **AOT Compilation** | Qualcomm, MediaTek, ARM, x86 |
 
 ---
 
@@ -136,10 +135,6 @@ except Exception:
 # Write flatbuffer to disk
 with open("model.tflite", "wb") as f:
     f.write(tflite_model)
-
-# Optional: AOT compilation for specific hardware
-if aot_compile_targets:
-    compile_for_hardware(tflite_model, targets)
 ```
 
 **Visual Flow:**
@@ -195,9 +190,6 @@ pip install keras>=3.0.0 tensorflow>=2.16.0
 
 # For Keras-Hub models
 pip install keras-hub>=0.17.0
-
-# For AOT compilation (optional)
-pip install ai-edge-litert
 ```
 
 ### Backend Configuration
@@ -590,42 +582,7 @@ from keras.src.export.litert import export_litert
 export_litert(model, "custom.tflite", input_signature=input_signature)
 ```
 
-### 5.3 AOT (Ahead-of-Time) Compilation
-
-Compile for specific hardware targets for optimal performance:
-
-```python
-import keras
-
-model = keras.Sequential([...])
-
-# Compile for Qualcomm chips
-model.export(
-    "model_qualcomm.tflite",
-    format="litert",
-    aot_compile_targets=["qualcomm"]
-)
-
-# Compile for multiple targets
-model.export(
-    "model_multi.tflite",
-    format="litert",
-    aot_compile_targets=["qualcomm", "mediatek", "arm"]
-)
-```
-
-**Supported AOT Targets:**
-- `qualcomm` - Qualcomm Hexagon DSP
-- `mediatek` - MediaTek APU
-- `arm` - ARM Mali GPU
-- `x86` - Intel x86 CPU
-
-**Requirements:**
-```bash
-pip install ai-edge-litert
-```
-
-### 5.4 Backend-Specific Export
+### 5.3 Backend-Specific Export
 
 #### Training with JAX, Exporting to LiteRT
 

@@ -131,8 +131,7 @@ KERAS-HUB LAYER (Domain Knowledge)
 KERAS CORE LAYER (Export Mechanics)
   ├─ Dict input detection
   ├─ Adapter creation
-  ├─ TFLite conversion
-  └─ AOT compilation
+  └─ TFLite conversion
   ↓
 OUTPUT (.tflite file)
 ```
@@ -163,8 +162,7 @@ export_litert()
   ├─> 4. Convert to TFLite (_convert_to_tflite)
   │     ├─> Direct conversion (preferred)
   │     └─> Wrapper-based (fallback)
-  ├─> 5. Save .tflite file
-  └─> 6. AOT compile (optional)
+  └─> 5. Save .tflite file
 ```
 
 #### 4.1.2 Dict Input Detection
@@ -995,7 +993,6 @@ class LiteRTExporter(KerasHubExporter):
             self.model,
             filepath,
             input_signature=input_signature,
-            aot_compile_targets=self.aot_compile_targets,
             **self.export_kwargs
         )
 ```
@@ -1224,7 +1221,6 @@ With quantization: ~75% reduction (int8)
 - **LiteRT:** TensorFlow Lite runtime
 - **TFLite:** TensorFlow Lite format
 - **Adapter Pattern:** Interface conversion pattern
-- **AOT Compilation:** Ahead-of-Time compilation
 - **Quantization:** Reducing numerical precision
 - **InputSpec:** Keras input specification
 - **Concrete Function:** TensorFlow traced graph
