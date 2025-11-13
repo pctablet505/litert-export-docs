@@ -93,17 +93,7 @@ print("✓ Exported gemma.tflite")
 
 When you call `model.export("model.tflite", format="litert")`, the system performs these steps:
 
-**1. Model Building & Validation**
-```python
-# Ensures model is fully built with concrete input shapes
-if not model.built:
-    if has_input_signature:
-        model.build(input_signature)
-    else:
-        raise ValueError("Model must be built first")
-```
-
-**2. Input Signature Inference**
+**1. Input Signature Inference**
 ```python
 # For Keras-Hub models:
 config = get_exporter_config(model)  # Detects model type
@@ -115,7 +105,7 @@ input_signature = model.inputs  # Uses model.inputs directly
 # Result: [(None, 784)] for Sequential MNIST model
 ```
 
-**3. Dict-to-List Adaptation** (if needed)
+**2. Dict-to-List Adaptation** (if needed)
 ```python
 # If model uses dictionary inputs (common in Keras-Hub):
 if is_dict_input(model):
@@ -126,7 +116,7 @@ else:
     model_to_export = model  # Export directly
 ```
 
-**4. TFLite Conversion**
+**3. TFLite Conversion**
 ```python
 # Try direct conversion first (faster)
 try:
@@ -141,7 +131,7 @@ except Exception:
     tflite_model = wrapper_based_conversion(model_to_export)
 ```
 
-**5. File Output**
+**4. File Output**
 ```python
 # Write flatbuffer to disk
 with open("model.tflite", "wb") as f:
@@ -161,38 +151,26 @@ if aot_compile_targets:
          │
          ▼
 ┌─────────────────┐
-│  Build Check    │ Ensure model.built = True
+│ 1. Signature    │ Auto-detect input shapes/types
+│    Inference    │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Signature Infer │ Auto-detect input shapes/types
+│ 2. Dict-to-List │ Create adapter if model uses dict inputs
+│    Adaptation   │ (Keras-Hub models)
 └────────┬────────┘
          │
          ▼
-    ┌────────┐
-    │ Dict?  │ Check if model uses dict inputs
-    └───┬─┬──┘
-        │ │
-    YES │ │ NO
-        │ │
-        ▼ └──────────────────┐
-┌─────────────────┐          │
-│ Create Adapter  │          │
-│ (list→dict)     │          │
-└────────┬────────┘          │
-         │                   │
-         └────────┬──────────┘
-                  │
-                  ▼
-         ┌─────────────────┐
-         │ TFLite Convert  │ (with fallback strategy)
-         └────────┬────────┘
-                  │
-                  ▼
-         ┌─────────────────┐
-         │ Save .tflite    │
-         └─────────────────┘
+┌─────────────────┐
+│ 3. TFLite       │ Convert to .tflite format
+│    Conversion   │ (direct or wrapper-based)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ 4. File Output  │ Save .tflite file
+└─────────────────┘
 ```
 
 **Performance Metrics:**
@@ -372,16 +350,9 @@ class CustomModel(keras.Model):
 # Create model
 model = CustomModel()
 
-# CRITICAL: Build the model first!
-# Option 1: Explicit build
-model.build((None, 784))  # (batch_size, input_dim)
-
-# Option 2: Build by calling with sample data
+# CRITICAL: Call the model with sample data first to establish input shapes
 sample_input = np.zeros((1, 784), dtype=np.float32)
 _ = model(sample_input, training=False)
-
-# Verify model is built
-assert model.built, "Model must be built before export"
 
 # Export to LiteRT
 model.export("custom.tflite", format="litert")
@@ -389,11 +360,11 @@ model.export("custom.tflite", format="litert")
 
 **Important for Subclassed Models:**
 
-1. **Always Build Before Export**
+1. **Call Model with Sample Data First**
    ```python
-   # Check if built
-   if not model.built:
-       model.build(input_shape)  # Or call with sample data
+   # Subclassed models need to be called once to establish input shapes
+   sample_input = np.zeros((1, 784), dtype=np.float32)
+   _ = model(sample_input, training=False)
    ```
 
 2. **Handle Training Flag**
@@ -463,7 +434,7 @@ model.export("custom.tflite", format="litert")
 
 | Issue | Symptom | Solution |
 |-------|---------|----------|
-| Model not built | `ValueError: Model must be built` | Call `model.build()` or trace with data |
+| Model not traced | Export fails or wrong shapes | Call model with sample data before export |
 | Dynamic shapes not captured | Wrong output shapes | Use `InputSpec` with dynamic dimensions |
 | Python control flow | Incorrect graph | Use TensorFlow ops (`tf.cond`, `tf.while_loop`) |
 | Training flag | Different outputs | Ensure `training=False` during export |
@@ -1208,819 +1179,6 @@ model.export(
 | Float16 | 50% | 1.5-2x | 99.5% | No |
 | Full Integer | 75% | 3-4x | 97-99% | Yes |
 
----
-
-## 8. Mobile Deployment
-
-### 8.1 Android Integration
-
-#### Setup
-
-**1. Add Dependencies (app/build.gradle)**
-
-```gradle
-android {
-    // ...
-    aaptOptions {
-        noCompress "tflite"  // Don't compress .tflite files
-    }
-}
-
-dependencies {
-    // Core TFLite library
-    implementation 'org.tensorflow:tensorflow-lite:2.14.0'
-    
-    // Optional: GPU delegate for acceleration
-    implementation 'org.tensorflow:tensorflow-lite-gpu:2.14.0'
-    
-    // Optional: Android Support Library (metadata, ops)
-    implementation 'org.tensorflow:tensorflow-lite-support:0.4.4'
-}
-```
-
-**2. Add Model to Assets**
-
-Place `model.tflite` in `app/src/main/assets/`
-
-```
-app/
-├── src/
-│   └── main/
-│       ├── assets/
-│       │   └── model.tflite    ← Your exported model
-│       ├── java/
-│       └── res/
-```
-
-#### Kotlin Example - Image Classification
-
-```kotlin
-import android.content.Context
-import android.graphics.Bitmap
-import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
-import org.tensorflow.lite.gpu.GpuDelegate
-import java.io.FileInputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
-
-class ImageClassifier(context: Context) {
-    private val interpreter: Interpreter
-    private val gpuDelegate: GpuDelegate?
-    
-    companion object {
-        private const val MODEL_PATH = "model.tflite"
-        private const val INPUT_SIZE = 224
-        private const val NUM_CLASSES = 1000
-        private const val PIXEL_SIZE = 3  // RGB
-        private const val IMAGE_MEAN = 0f
-        private const val IMAGE_STD = 255f
-    }
-    
-    init {
-        // Load model
-        val model = loadModelFile(context)
-        
-        // Configure interpreter options
-        val options = Interpreter.Options()
-        options.setNumThreads(4)  // Use 4 CPU threads
-        
-        // Try to use GPU delegate if available
-        val compatList = CompatibilityList()
-        gpuDelegate = if (compatList.isDelegateSupportedOnThisDevice) {
-            GpuDelegate(compatList.bestOptionsForThisDevice)
-        } else {
-            null
-        }
-        gpuDelegate?.let { options.addDelegate(it) }
-        
-        interpreter = Interpreter(model, options)
-        
-        // Print input/output details for debugging
-        printModelDetails()
-    }
-    
-    private fun loadModelFile(context: Context): MappedByteBuffer {
-        val assetFileDescriptor = context.assets.openFd(MODEL_PATH)
-        val fileInputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
-        val fileChannel = fileInputStream.channel
-        val startOffset = assetFileDescriptor.startOffset
-        val declaredLength = assetFileDescriptor.declaredLength
-        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-    }
-    
-    private fun printModelDetails() {
-        val inputTensor = interpreter.getInputTensor(0)
-        val outputTensor = interpreter.getOutputTensor(0)
-        
-        println("=== Model Details ===")
-        println("Input shape: ${inputTensor.shape().contentToString()}")
-        println("Input dtype: ${inputTensor.dataType()}")
-        println("Output shape: ${outputTensor.shape().contentToString()}")
-        println("Output dtype: ${outputTensor.dataType()}")
-    }
-    
-    fun classify(bitmap: Bitmap): FloatArray {
-        // 1. Preprocess image
-        val inputBuffer = preprocessImage(bitmap)
-        
-        // 2. Prepare output buffer
-        val output = Array(1) { FloatArray(NUM_CLASSES) }
-        
-        // 3. Run inference
-        interpreter.run(inputBuffer, output)
-        
-        // 4. Return predictions
-        return output[0]
-    }
-    
-    private fun preprocessImage(bitmap: Bitmap): ByteBuffer {
-        // Resize bitmap to model input size
-        val resizedBitmap = Bitmap.createScaledBitmap(
-            bitmap, 
-            INPUT_SIZE, 
-            INPUT_SIZE, 
-            true
-        )
-        
-        // Allocate buffer (4 bytes per float)
-        val byteBuffer = ByteBuffer.allocateDirect(
-            4 * INPUT_SIZE * INPUT_SIZE * PIXEL_SIZE
-        )
-        byteBuffer.order(ByteOrder.nativeOrder())
-        
-        // Extract pixels
-        val intValues = IntArray(INPUT_SIZE * INPUT_SIZE)
-        resizedBitmap.getPixels(
-            intValues, 
-            0, 
-            INPUT_SIZE, 
-            0, 
-            0, 
-            INPUT_SIZE, 
-            INPUT_SIZE
-        )
-        
-        // Convert to normalized float values
-        var pixel = 0
-        for (i in 0 until INPUT_SIZE) {
-            for (j in 0 until INPUT_SIZE) {
-                val value = intValues[pixel++]
-                
-                // Extract RGB
-                val r = ((value shr 16) and 0xFF)
-                val g = ((value shr 8) and 0xFF)
-                val b = (value and 0xFF)
-                
-                // Normalize to [0, 1]
-                byteBuffer.putFloat((r - IMAGE_MEAN) / IMAGE_STD)
-                byteBuffer.putFloat((g - IMAGE_MEAN) / IMAGE_STD)
-                byteBuffer.putFloat((b - IMAGE_MEAN) / IMAGE_STD)
-            }
-        }
-        
-        return byteBuffer
-    }
-    
-    fun getTopPredictions(probabilities: FloatArray, k: Int = 5): List<Pair<Int, Float>> {
-        return probabilities
-            .mapIndexed { index, probability -> Pair(index, probability) }
-            .sortedByDescending { it.second }
-            .take(k)
-    }
-    
-    fun close() {
-        interpreter.close()
-        gpuDelegate?.close()
-    }
-}
-
-// Usage example
-class MainActivity : AppCompatActivity() {
-    private lateinit var classifier: ImageClassifier
-    
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        
-        // Initialize classifier
-        classifier = ImageClassifier(this)
-        
-        // Load image
-        val bitmap = BitmapFactory.decodeResource(resources, R.drawable.cat_image)
-        
-        // Run inference
-        val predictions = classifier.classify(bitmap)
-        
-        // Get top 5 predictions
-        val top5 = classifier.getTopPredictions(predictions, 5)
-        top5.forEach { (classId, confidence) ->
-            println("Class $classId: ${confidence * 100}%")
-        }
-    }
-    
-    override fun onDestroy() {
-        super.onDestroy()
-        classifier.close()
-    }
-}
-```
-
-#### Kotlin Example - Text Generation (Keras-Hub Model)
-
-```kotlin
-import android.content.Context
-import org.tensorflow.lite.Interpreter
-import java.nio.IntBuffer
-
-class TextGenerator(context: Context) {
-    private val interpreter: Interpreter
-    
-    companion object {
-        private const val MODEL_PATH = "gemma.tflite"
-        private const val MAX_SEQUENCE_LENGTH = 128
-        private const val VOCAB_SIZE = 256000
-    }
-    
-    init {
-        val model = loadModelFile(context, MODEL_PATH)
-        val options = Interpreter.Options()
-        options.setNumThreads(4)
-        interpreter = Interpreter(model, options)
-        
-        // Print model details
-        println("Inputs: ${interpreter.inputTensorCount}")
-        println("Outputs: ${interpreter.outputTensorCount}")
-        
-        for (i in 0 until interpreter.inputTensorCount) {
-            val tensor = interpreter.getInputTensor(i)
-            println("Input $i: ${tensor.shape().contentToString()}, ${tensor.dataType()}")
-        }
-    }
-    
-    fun generate(tokenIds: IntArray, paddingMask: IntArray): FloatArray {
-        // Keras-Hub models use TWO inputs: token_ids and padding_mask
-        // Must be provided in ORDER (list inputs)
-        
-        // Prepare input buffers
-        val tokenIdsBuffer = IntBuffer.allocate(MAX_SEQUENCE_LENGTH)
-        tokenIdsBuffer.put(tokenIds)
-        tokenIdsBuffer.rewind()
-        
-        val paddingMaskBuffer = IntBuffer.allocate(MAX_SEQUENCE_LENGTH)
-        paddingMaskBuffer.put(paddingMask)
-        paddingMaskBuffer.rewind()
-        
-        // Prepare output buffer (logits over vocabulary)
-        val output = Array(1) { Array(MAX_SEQUENCE_LENGTH) { FloatArray(VOCAB_SIZE) } }
-        
-        // Run inference with BOTH inputs
-        val inputs = arrayOf(tokenIdsBuffer, paddingMaskBuffer)
-        val outputs = mapOf(0 to output)
-        
-        interpreter.runForMultipleInputsOutputs(inputs, outputs)
-        
-        return output[0][tokenIds.size - 1]  // Get logits for last token
-    }
-    
-    fun close() {
-        interpreter.close()
-    }
-    
-    private fun loadModelFile(context: Context, modelPath: String): java.nio.MappedByteBuffer {
-        val assetFileDescriptor = context.assets.openFd(modelPath)
-        val fileInputStream = java.io.FileInputStream(assetFileDescriptor.fileDescriptor)
-        val fileChannel = fileInputStream.channel
-        val startOffset = assetFileDescriptor.startOffset
-        val declaredLength = assetFileDescriptor.declaredLength
-        return fileChannel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-    }
-}
-
-// Usage
-val generator = TextGenerator(context)
-
-// Tokenize input text (you'll need a tokenizer)
-val prompt = "Hello, how are you?"
-val tokenIds = tokenize(prompt)  // Returns IntArray
-val paddingMask = createPaddingMask(tokenIds)  // Returns IntArray
-
-// Generate next token
-val logits = generator.generate(tokenIds, paddingMask)
-val nextTokenId = argmax(logits)
-
-generator.close()
-```
-
-#### Performance Optimization Tips
-
-```kotlin
-// 1. Use GPU Delegate
-val compatList = CompatibilityList()
-if (compatList.isDelegateSupportedOnThisDevice) {
-    val options = Interpreter.Options()
-    val gpuDelegate = GpuDelegate(compatList.bestOptionsForThisDevice)
-    options.addDelegate(gpuDelegate)
-    interpreter = Interpreter(model, options)
-}
-
-// 2. Use NNAPI Delegate (hardware acceleration)
-val options = Interpreter.Options()
-val nnApiDelegate = NnApiDelegate()
-options.addDelegate(nnApiDelegate)
-
-// 3. Adjust thread count
-options.setNumThreads(Runtime.getRuntime().availableProcessors())
-
-// 4. Enable XNNPACK delegate (CPU optimization)
-options.setUseXNNPACK(true)
-
-// 5. Preallocate tensors
-interpreter.allocateTensors()
-```
-    
-    fun close() {
-        interpreter.close()
-    }
-}
-```
-
-### 8.2 iOS Integration
-
-#### Setup
-
-**1. Add TensorFlow Lite via CocoaPods (Podfile)**
-
-```ruby
-platform :ios, '12.0'
-
-target 'YourApp' do
-  use_frameworks!
-  
-  # Core TFLite
-  pod 'TensorFlowLiteSwift', '~> 2.14.0'
-  
-  # Optional: Metal delegate for GPU acceleration
-  pod 'TensorFlowLiteSwift/Metal', '~> 2.14.0'
-  
-  # Optional: Core ML delegate
-  pod 'TensorFlowLiteSwift/CoreML', '~> 2.14.0'
-end
-```
-
-```bash
-pod install
-```
-
-**2. Add Model to Project**
-
-- Drag `model.tflite` into Xcode project
-- Check "Copy items if needed"
-- Add to target
-
-#### Swift Example - Image Classification
-
-```swift
-import UIKit
-import TensorFlowLite
-
-class ImageClassifier {
-    private var interpreter: Interpreter
-    private let modelPath: String
-    
-    // Model parameters
-    private let inputSize = 224
-    private let numClasses = 1000
-    private let batchSize = 1
-    private let channels = 3
-    
-    init() throws {
-        // Load model from bundle
-        guard let modelPath = Bundle.main.path(forResource: "model", ofType: "tflite") else {
-            throw NSError(domain: "ImageClassifier", code: -1, 
-                         userInfo: [NSLocalizedDescriptionKey: "Model file not found"])
-        }
-        self.modelPath = modelPath
-        
-        // Configure interpreter options
-        var options = Interpreter.Options()
-        options.threadCount = 4
-        
-        // Try to use Metal delegate (GPU) if available
-        #if targetEnvironment(simulator)
-        print("Running on simulator, GPU not available")
-        #else
-        if let metalDelegate = MetalDelegate() {
-            options.addDelegate(metalDelegate)
-            print("✓ Using Metal GPU delegate")
-        }
-        #endif
-        
-        // Create interpreter
-        interpreter = try Interpreter(modelPath: modelPath, options: options)
-        
-        // Allocate tensors
-        try interpreter.allocateTensors()
-        
-        // Print model details
-        printModelDetails()
-    }
-    
-    private func printModelDetails() {
-        do {
-            let inputTensor = try interpreter.input(at: 0)
-            let outputTensor = try interpreter.output(at: 0)
-            
-            print("=== Model Details ===")
-            print("Input shape: \(inputTensor.shape)")
-            print("Input dtype: \(inputTensor.dataType)")
-            print("Output shape: \(outputTensor.shape)")
-            print("Output dtype: \(outputTensor.dataType)")
-        } catch {
-            print("Failed to get model details: \(error)")
-        }
-    }
-    
-    func classify(_ image: UIImage) throws -> [Float] {
-        // 1. Preprocess image
-        guard let inputData = preprocessImage(image) else {
-            throw NSError(domain: "ImageClassifier", code: -1,
-                         userInfo: [NSLocalizedDescriptionKey: "Failed to preprocess image"])
-        }
-        
-        // 2. Copy data to input tensor
-        try interpreter.copy(inputData, toInputAt: 0)
-        
-        // 3. Run inference
-        try interpreter.invoke()
-        
-        // 4. Get output tensor
-        let outputTensor = try interpreter.output(at: 0)
-        
-        // 5. Convert output to Float array
-        let outputData = outputTensor.data
-        let predictions = outputData.withUnsafeBytes { (pointer: UnsafeRawBufferPointer) -> [Float] in
-            let floatBuffer = pointer.bindMemory(to: Float.self)
-            return Array(floatBuffer)
-        }
-        
-        return predictions
-    }
-    
-    private func preprocessImage(_ image: UIImage) -> Data? {
-        // Resize image to model input size
-        guard let resizedImage = image.resized(to: CGSize(width: inputSize, height: inputSize)) else {
-            return nil
-        }
-        
-        // Convert to RGB pixel data
-        guard let cgImage = resizedImage.cgImage else {
-            return nil
-        }
-        
-        let width = cgImage.width
-        let height = cgImage.height
-        let bytesPerRow = width * 4
-        var pixelData = [UInt8](repeating: 0, count: width * height * 4)
-        
-        let context = CGContext(
-            data: &pixelData,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        )
-        
-        context?.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        
-        // Convert to normalized float values (0-1 range)
-        var floatData = Data(count: width * height * channels * MemoryLayout<Float>.size)
-        
-        floatData.withUnsafeMutableBytes { (floatPointer: UnsafeMutableRawBufferPointer) in
-            guard let floatBuffer = floatPointer.bindMemory(to: Float.self).baseAddress else {
-                return
-            }
-            
-            for y in 0..<height {
-                for x in 0..<width {
-                    let pixelIndex = (y * width + x) * 4
-                    let outputIndex = (y * width + x) * 3
-                    
-                    // Extract RGB (ignore alpha)
-                    let r = Float(pixelData[pixelIndex]) / 255.0
-                    let g = Float(pixelData[pixelIndex + 1]) / 255.0
-                    let b = Float(pixelData[pixelIndex + 2]) / 255.0
-                    
-                    // Store in RGB order
-                    floatBuffer[outputIndex] = r
-                    floatBuffer[outputIndex + 1] = g
-                    floatBuffer[outputIndex + 2] = b
-                }
-            }
-        }
-        
-        return floatData
-    }
-    
-    func getTopPredictions(_ probabilities: [Float], k: Int = 5) -> [(classId: Int, confidence: Float)] {
-        return probabilities
-            .enumerated()
-            .map { (index, value) in (classId: index, confidence: value) }
-            .sorted { $0.confidence > $1.confidence }
-            .prefix(k)
-            .map { $0 }
-    }
-}
-
-// UIImage extension for resizing
-extension UIImage {
-    func resized(to size: CGSize) -> UIImage? {
-        UIGraphicsBeginImageContextWithOptions(size, false, 1.0)
-        defer { UIGraphicsEndImageContext() }
-        
-        draw(in: CGRect(origin: .zero, size: size))
-        return UIGraphicsGetImageFromCurrentImageContext()
-    }
-}
-
-// Usage in ViewController
-class ViewController: UIViewController {
-    private var classifier: ImageClassifier?
-    
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        
-        do {
-            // Initialize classifier
-            classifier = try ImageClassifier()
-            
-            // Load test image
-            guard let image = UIImage(named: "cat.jpg") else {
-                print("Failed to load image")
-                return
-            }
-            
-            // Run inference
-            let predictions = try classifier?.classify(image)
-            
-            // Get top 5 predictions
-            if let predictions = predictions {
-                let top5 = classifier?.getTopPredictions(predictions, k: 5)
-                top5?.forEach { result in
-                    print("Class \(result.classId): \(result.confidence * 100)%")
-                }
-            }
-            
-        } catch {
-            print("Error: \(error)")
-        }
-    }
-}
-```
-
-#### Swift Example - Text Generation (Keras-Hub Model)
-
-```swift
-import TensorFlowLite
-
-class TextGenerator {
-    private var interpreter: Interpreter
-    private let maxSequenceLength = 128
-    private let vocabSize = 256000
-    
-    init(modelPath: String) throws {
-        var options = Interpreter.Options()
-        options.threadCount = 4
-        
-        interpreter = try Interpreter(modelPath: modelPath, options: options)
-        try interpreter.allocateTensors()
-        
-        // Print input details
-        print("Model has \(interpreter.inputTensorCount) inputs")
-        for i in 0..<interpreter.inputTensorCount {
-            let tensor = try interpreter.input(at: i)
-            print("Input \(i): shape=\(tensor.shape), dtype=\(tensor.dataType)")
-        }
-    }
-    
-    func generate(tokenIds: [Int32], paddingMask: [Int32]) throws -> [Float] {
-        // Keras-Hub models require TWO inputs in ORDER
-        
-        // 1. Prepare token_ids input
-        let tokenIdsData = Data(bytes: tokenIds, count: tokenIds.count * MemoryLayout<Int32>.size)
-        try interpreter.copy(tokenIdsData, toInputAt: 0)
-        
-        // 2. Prepare padding_mask input
-        let paddingMaskData = Data(bytes: paddingMask, count: paddingMask.count * MemoryLayout<Int32>.size)
-        try interpreter.copy(paddingMaskData, toInputAt: 1)
-        
-        // 3. Run inference
-        try interpreter.invoke()
-        
-        // 4. Get output (logits for next token prediction)
-        let outputTensor = try interpreter.output(at: 0)
-        let outputData = outputTensor.data
-        
-        // Extract logits for last valid token
-        let logits = outputData.withUnsafeBytes { (pointer: UnsafeRawBufferPointer) -> [Float] in
-            let floatBuffer = pointer.bindMemory(to: Float.self)
-            let lastTokenIndex = (tokenIds.count - 1) * vocabSize
-            return Array(floatBuffer[lastTokenIndex..<(lastTokenIndex + vocabSize)])
-        }
-        
-        return logits
-    }
-    
-    func sampleNextToken(logits: [Float], temperature: Float = 1.0) -> Int32 {
-        // Apply temperature
-        let scaledLogits = logits.map { $0 / temperature }
-        
-        // Softmax
-        let maxLogit = scaledLogits.max() ?? 0
-        let expLogits = scaledLogits.map { exp($0 - maxLogit) }
-        let sumExp = expLogits.reduce(0, +)
-        let probabilities = expLogits.map { $0 / sumExp }
-        
-        // Sample from distribution
-        let randomValue = Float.random(in: 0..<1)
-        var cumulativeProb: Float = 0.0
-        
-        for (index, prob) in probabilities.enumerated() {
-            cumulativeProb += prob
-            if randomValue <= cumulativeProb {
-                return Int32(index)
-            }
-        }
-        
-        return Int32(probabilities.count - 1)
-    }
-}
-
-// Usage
-do {
-    let modelPath = Bundle.main.path(forResource: "gemma", ofType: "tflite")!
-    let generator = try TextGenerator(modelPath: modelPath)
-    
-    // Tokenize prompt (you'll need a tokenizer)
-    var tokenIds: [Int32] = [/* tokenized prompt */]
-    var paddingMask: [Int32] = [/* padding mask */]
-    
-    // Generate tokens iteratively
-    for _ in 0..<20 {  // Generate 20 tokens
-        let logits = try generator.generate(tokenIds: tokenIds, paddingMask: paddingMask)
-        let nextToken = generator.sampleNextToken(logits: logits, temperature: 0.8)
-        
-        tokenIds.append(nextToken)
-        paddingMask.append(1)
-        
-        print("Generated token: \(nextToken)")
-    }
-    
-} catch {
-    print("Error: \(error)")
-}
-```
-
-#### Performance Optimization for iOS
-
-```swift
-// 1. Use Metal Delegate (GPU)
-#if !targetEnvironment(simulator)
-var options = Interpreter.Options()
-if let metalDelegate = MetalDelegate() {
-    options.addDelegate(metalDelegate)
-}
-interpreter = try Interpreter(modelPath: modelPath, options: options)
-#endif
-
-// 2. Use Core ML Delegate (Neural Engine)
-var options = Interpreter.Options()
-if let coreMLDelegate = CoreMLDelegate() {
-    options.addDelegate(coreMLDelegate)
-}
-
-// 3. Optimize thread count
-options.threadCount = ProcessInfo.processInfo.activeProcessorCount
-
-// 4. Preallocate tensors
-try interpreter.allocateTensors()
-
-// 5. Reuse interpreter instance (don't recreate for each inference)
-// Create once, reuse many times
-```
-
-#### Java Example (Android)
-
-```java
-import org.tensorflow.lite.Interpreter;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-
-public class ModelInference {
-    private Interpreter interpreter;
-    
-    public ModelInference(String modelPath) {
-        ByteBuffer model = loadModelFile(modelPath);
-        interpreter = new Interpreter(model);
-    }
-    
-    public float[] predict(float[] input) {
-        // Prepare buffers
-        ByteBuffer inputBuffer = ByteBuffer.allocateDirect(input.length * 4);
-        inputBuffer.order(ByteOrder.nativeOrder());
-        for (float val : input) {
-            inputBuffer.putFloat(val);
-        }
-        
-        ByteBuffer outputBuffer = ByteBuffer.allocateDirect(OUTPUT_SIZE * 4);
-        outputBuffer.order(ByteOrder.nativeOrder());
-        
-        // Run inference
-        interpreter.run(inputBuffer, outputBuffer);
-        
-        // Parse output
-        outputBuffer.rewind();
-        float[] output = new float[OUTPUT_SIZE];
-        outputBuffer.asFloatBuffer().get(output);
-        return output;
-    }
-}
-```
-
-### 8.2 iOS Integration
-
-#### Swift Example
-
-```swift
-import TensorFlowLite
-
-class ModelInference {
-    private var interpreter: Interpreter
-    
-    init(modelPath: String) throws {
-        interpreter = try Interpreter(modelPath: modelPath)
-        try interpreter.allocateTensors()
-    }
-    
-    func predict(input: [Float]) throws -> [Float] {
-        // Copy input data
-        let inputData = Data(bytes: input, count: input.count * MemoryLayout<Float>.size)
-        try interpreter.copy(inputData, toInputAt: 0)
-        
-        // Run inference
-        try interpreter.invoke()
-        
-        // Get output
-        let outputTensor = try interpreter.output(at: 0)
-        let outputData = outputTensor.data
-        
-        // Convert to float array
-        let output = outputData.withUnsafeBytes { (pointer: UnsafePointer<Float>) in
-            Array(UnsafeBufferPointer(start: pointer, count: outputData.count / MemoryLayout<Float>.size))
-        }
-        
-        return output
-    }
-}
-```
-
-### 8.3 Performance Optimization Tips
-
-1. **Use GPU Delegate (Android)**
-```kotlin
-import org.tensorflow.lite.gpu.GpuDelegate
-
-val options = Interpreter.Options()
-val gpuDelegate = GpuDelegate()
-options.addDelegate(gpuDelegate)
-val interpreter = Interpreter(model, options)
-```
-
-2. **Use Metal Delegate (iOS)**
-```swift
-import TensorFlowLite
-
-let options = Interpreter.Options()
-options.addDelegate(MetalDelegate())
-let interpreter = try Interpreter(modelPath: path, options: options)
-```
-
-3. **Use NNAPI (Android)**
-```kotlin
-val options = Interpreter.Options()
-options.setUseNNAPI(true)
-val interpreter = Interpreter(model, options)
-```
-
-4. **Thread Count Optimization**
-```kotlin
-val options = Interpreter.Options()
-options.setNumThreads(4)  // Use 4 CPU threads
-val interpreter = Interpreter(model, options)
-```
 
 ---
 
@@ -2050,16 +1208,14 @@ os.environ["KERAS_BACKEND"] = "tensorflow"
 import keras
 ```
 
-#### "Model has not been built"
+#### "Unable to infer input signature"
 
 **Solution:**
 ```python
-# For Functional/Sequential models
-model.build((None, 28, 28, 1))
-
-# For Subclassed models
+# For Subclassed models, call with sample data first
 import numpy as np
-_ = model(np.zeros((1, 28, 28, 1)))
+sample_input = np.zeros((1, 28, 28, 1))
+_ = model(sample_input, training=False)
 
 # Then export
 model.export("model.tflite", format="litert")
@@ -2347,7 +1503,7 @@ benchmark_inference("model_quantized.tflite", (1, 224, 224, 3))
 
 | Issue | Symptom | Solution |
 |-------|---------|----------|
-| **Model not built** | `ValueError: Model must be built` | Call `model.build()` or trace with sample data |
+| **Unable to infer signature** | Export fails for subclassed model | Call model with sample data before export |
 | **Wrong backend** | `RuntimeError: Backend must be TensorFlow` | Set `KERAS_BACKEND=tensorflow` before importing |
 | **Out of memory** | `ResourceExhaustedError` | Use quantization, cloud machine, or export in steps |
 | **Unsupported ops** | `ConverterError: Op X not supported` | Enable `SELECT_TF_OPS`, simplify custom layers |

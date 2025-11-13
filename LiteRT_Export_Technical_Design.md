@@ -157,15 +157,14 @@ OUTPUT (.tflite file)
 
 ```python
 export_litert()
-  ├─> 1. _ensure_model_built()
-  ├─> 2. Infer input signature
-  ├─> 3. Detect dict inputs (_has_dict_inputs)
-  ├─> 4. Create adapter if needed (_create_dict_adapter)
-  ├─> 5. Convert to TFLite (_convert_to_tflite)
+  ├─> 1. Infer input signature
+  ├─> 2. Detect dict inputs (_has_dict_inputs)
+  ├─> 3. Create adapter if needed (_create_dict_adapter)
+  ├─> 4. Convert to TFLite (_convert_to_tflite)
   │     ├─> Direct conversion (preferred)
   │     └─> Wrapper-based (fallback)
-  ├─> 6. Save .tflite file
-  └─> 7. AOT compile (optional)
+  ├─> 5. Save .tflite file
+  └─> 6. AOT compile (optional)
 ```
 
 #### 4.1.2 Dict Input Detection
@@ -573,7 +572,7 @@ def _convert_to_tflite(self, model):
                 f"Direct conversion error: {e}\n"
                 f"Wrapper conversion error: {wrapper_error}\n\n"
                 f"Possible solutions:\n"
-                f"1. Ensure model is built: model.build(input_shape)\n"
+                f"1. For subclassed models: call model with sample data first\n"
                 f"2. Simplify custom layers to use standard TensorFlow ops\n"
                 f"3. Avoid Python control flow in call() method\n"
                 f"4. Check that all operations are TFLite-compatible"
@@ -1029,18 +1028,6 @@ class LiteRTExporter(KerasHubExporter):
 
 ### 5.1 Key Algorithms
 
-#### Model Building Verification
-
-```python
-def _ensure_model_built(self):
-    if not self.model.built:
-        if self.input_signature:
-            # Build with signature
-            self.model.build(shapes_from_signature)
-        elif hasattr(self.model, 'layers'):
-            raise ValueError("Model must be built before export")
-```
-
 #### Preprocessor Inference
 
 ```python
@@ -1215,7 +1202,7 @@ With quantization: ~75% reduction (int8)
 
 ### 8.1 Planned Enhancements
 
-1. **Extended Backend Support** - Native JAX/PyTorch export
+1. **Extended Backend Support** - LiteRT export with  JAX/PyTorch backend.
 2. **Auto-Quantization** - Recommend optimal strategy
 3. **Mobile Runtime Libraries** - Complete Android/iOS SDKs
 4. **Optimization Advisor** - Analyze and suggest improvements
@@ -1223,14 +1210,10 @@ With quantization: ~75% reduction (int8)
 ### 8.2 Known Limitations
 
 1. **TensorFlow Backend Required** - For export (can train with any)
-2. **Memory Requirements** - Large models need significant RAM
+2. **Memory Requirements** - Large models need significant RAM almost 10x model size
 3. **Custom Ops** - May not be TFLite-compatible
 
-### 8.3 Research Directions
 
-1. **Adapter Optimization** - Flatten adapter completely
-2. **Mixed Precision** - Different precision per layer
-3. **Progressive Export** - Stream models layer-by-layer
 
 ---
 
