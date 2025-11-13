@@ -219,13 +219,15 @@ flowchart TD
    - Keras-Hub: Domain knowledge (model types, input requirements, defaults)
    - Keras Core: Export mechanics (dict handling, TFLite conversion)
 
-2. **Delegation Pattern:** Keras-Hub provides config, delegates conversion to Keras Core
+2. **Direct Delegation:** Keras-Hub config classes call Keras Core export_litert() directly (no wrapper classes)
 
 3. **Adapter Pattern:** Automatic dict->list conversion for TFLite compatibility
 
 4. **Universal Applicability:** Works for any Keras model with dict inputs (not just Keras-Hub)
 
 5. **Registry Pattern:** Config selection based on model type (isinstance checks)
+
+6. **Automatic Integration:** Configs auto-use preprocessor.sequence_length when available
 
 **Supported Model Types:**
 - **Task Models:** CausalLM, TextClassifier, ImageClassifier, Seq2SeqLM, ObjectDetector, ImageSegmenter
@@ -255,13 +257,12 @@ Location: `keras/src/export/litert.py`
 ```mermaid
 flowchart TD
     A["export_litert(model, filepath, input_signature)"]
-    B["1. Ensure model is built<br/>(_ensure_model_built)"]
-    C["2. Infer input signature if not provided<br/>• Check _inputs_struct for dict inputs<br/>• Fall back to model.inputs"]
-    D["3. Detect dictionary inputs<br/>(_has_dict_inputs)<br/>• Check model.inputs type<br/>• Check _inputs_struct<br/>• Check provided input_signature"]
-    E["4. If dict inputs: Create adapter<br/>(_create_dict_adapter)<br/>• Create Input layers for list inputs<br/>• Convert list->dict internally<br/>• Wrap original model"]
-    F["5. Convert to TFLite<br/>(_convert_to_tflite)<br/>• Try direct conversion first<br/>• Fall back to wrapper-based conversion if needed"]
-    G["6. Save .tflite file"]
-    H["7. Optional: AOT compilation<br/>(_aot_compile)"]
+    B["1. Infer input signature if not provided<br/>• Check _inputs_struct for dict inputs<br/>• Fall back to model.inputs"]
+    C["2. Detect dictionary inputs<br/>(_has_dict_inputs)<br/>• Check model.inputs type<br/>• Check _inputs_struct<br/>• Check provided input_signature"]
+    D["3. If dict inputs: Create adapter<br/>(_create_dict_adapter)<br/>• Create Input layers for list inputs<br/>• Convert list->dict internally<br/>• Wrap original model"]
+    E["4. Convert to TFLite<br/>(_convert_to_tflite)<br/>• Try direct conversion first<br/>• Fall back to wrapper-based conversion if needed"]
+    F["5. Save .tflite file"]
+    G["6. Optional: AOT compilation<br/>(_aot_compile)"]
     
     A --> B
     B --> C
@@ -269,13 +270,12 @@ flowchart TD
     D --> E
     E --> F
     F --> G
-    G --> H
     
     style A fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style C fill:#fff9c4,stroke:#f57f17,stroke-width:2px
     style D fill:#fff9c4,stroke:#f57f17,stroke-width:2px
-    style E fill:#fff9c4,stroke:#f57f17,stroke-width:2px
-    style F fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    style H fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    style E fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style G fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
 ```
 
 ### 4.3 Input Signature Strategy by Model Type
@@ -346,14 +346,23 @@ flowchart TD
 
 **Location:** `keras_hub/src/export/`
 
-Keras-Hub adds a model-aware layer that handles domain-specific export requirements before delegating to Keras Core's export mechanics.
+Keras-Hub provides a minimal layer focused solely on domain-specific input signature generation. All export mechanics are handled by Keras Core.
+
+**File Structure:**
+```
+keras_hub/src/export/
+├── configs.py          # Config classes + base class (all in one file)
+├── litert.py          # Convenience wrapper function
+└── __init__.py        # Public API exports
+```
 
 #### 4.5.1 Configuration System
 
 **Purpose:** Configs provide **domain-specific metadata** that can't be inferred from model structure:
 - Input names (`token_ids` vs `encoder_token_ids`)
 - Dimension semantics (which `None` is sequence_length vs batch)
-- Type-specific defaults (128 for text, 224 for vision)
+- Type-specific defaults (sequence_length from preprocessor for text models)
+- Automatic fallback to preprocessor settings when parameters not provided
 
 **Note:** Dict-to-list conversion is automatic in Keras Core. Configs only define what the input signature should look like.
 
@@ -362,44 +371,51 @@ Keras-Hub uses **one config class per model type** (not per model instance). All
 ```mermaid
 flowchart TB
     A["User calls model.export()"]
-    B["get_exporter_config(model)"]
-    C["Detect Model Type via isinstance()"]
+    B["Task.export() in task.py"]
+    C["get_exporter_config(model)"]
+    D["Detect Model Type via isinstance()"]
     
-    D1["CausalLMExporterConfig"]
-    D2["TextClassifierExporterConfig"]
-    D3["ImageClassifierExporterConfig"]
-    D4["Seq2SeqLMExporterConfig"]
-    D5["ObjectDetectorExporterConfig"]
-    D6["Other configs..."]
+    E1["CausalLMExporterConfig"]
+    E2["TextClassifierExporterConfig"]
+    E3["ImageClassifierExporterConfig"]
+    E4["Seq2SeqLMExporterConfig"]
+    E5["ObjectDetectorExporterConfig"]
+    E6["Other configs..."]
     
-    E["Config.get_input_signature()"]
-    F["LiteRTExporter"]
+    F["Config.get_input_signature()<br/>(auto-uses preprocessor settings)"]
     G["Keras Core export_litert()"]
+    H["Dict→list adapter + TFLite conversion"]
     
     A --> B
     B --> C
-    C --> D1
-    C --> D2
-    C --> D3
-    C --> D4
-    C --> D5
-    C --> D6
+    C --> D
+    D --> E1
+    D --> E2
+    D --> E3
+    D --> E4
+    D --> E5
+    D --> E6
     
-    D1 --> E
-    D2 --> E
-    D3 --> E
-    D4 --> E
-    D5 --> E
-    D6 --> E
+    E1 --> F
+    E2 --> F
+    E3 --> F
+    E4 --> F
+    E5 --> F
+    E6 --> F
     
-    E --> F
     F --> G
+    G --> H
     
     style A fill:#e1f5ff,stroke:#01579b,stroke-width:2px
-    style C fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    style E fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    style G fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    style D fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style F fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style H fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
 ```
+
+**Simplified Architecture:**
+- No separate `LiteRTExporter` class - direct delegation to Keras Core
+- Config classes only provide input signatures
+- All export mechanics handled by Keras Core's `export_litert()`
 
 **Supported Model Types:**
 - **Text:** CausalLM, TextClassifier, Seq2SeqLM, AudioToText
@@ -455,29 +471,18 @@ InputSpec(dtype="float32", shape=(None, height, width, 3), name="inputs")
 - Text: `sequence_length` parameter → inject into shape[1]
 - Vision: `image_size` parameter → inject into shape[1:3] 
 - Seq2Seq: Both encoder and decoder sequence lengths
-- Where to get defaults: tokenizer vs image preprocessor
+- Where to get defaults: automatically from preprocessor's `sequence_length` attribute
 
 **Auto-detection:** `get_exporter_config()` uses `isinstance()` with priority ordering
 
 **Dynamic shapes:** When parameters are `None`, exports with flexible dimensions for runtime resizing
 
-#### 4.5.4 Usage Examples
 
-```python
-# Text model - auto-infers token_ids + padding_mask
-model = keras_hub.models.GemmaCausalLM.from_preset("gemma_2b")
-model.export("model.tflite", format="litert", max_sequence_length=512)
 
-# Vision model - auto-detects image_size from preprocessor
-model = keras_hub.models.ImageClassifier.from_preset("efficientnetv2_b0")
-model.export("model.tflite", format="litert")
 
-# Multimodal - handles both text and vision inputs
-model = keras_hub.models.PaliGemmaCausalLM.from_preset("paligemma_3b_224")
-model.export("model.tflite", format="litert", max_sequence_length=128)
-```
-
-**Separation of Concerns:** Keras-Hub provides domain knowledge (input signatures), Keras Core handles export mechanics (dict conversion, TFLite compilation).
+**Separation of Concerns:** 
+- Keras-Hub: Provides domain knowledge (input signatures with automatic preprocessor defaults)
+- Keras Core: Handles all export mechanics (dict conversion, TFLite compilation, AOT compilation)
 
 ### 4.6 Complete Export Pipeline
 
@@ -487,11 +492,11 @@ The complete export flow from user code to deployed .tflite file:
 flowchart TD
     Step1["<b>STEP 1: USER CODE</b><br/><br/>model.export('model.tflite',<br/>format='litert',<br/>max_sequence_length=128)"]
     
-    Step2["<b>STEP 2: KERAS-HUB LAYER</b><br/><br/>1. Detects format='litert'<br/><br/>2. Infers input signature from model structure<br/>and preprocessor metadata<br/><br/>3. Delegates to Keras Core export pipeline"]
+    Step2["<b>STEP 2: KERAS-HUB LAYER</b><br/>(configs.py + task.py)<br/><br/>1. Task.export() detects format='litert'<br/><br/>2. Gets config via get_exporter_config(model)<br/><br/>3. Config generates input signature<br/>(auto-uses preprocessor.sequence_length if available)<br/><br/>4. Calls Keras Core export_litert() directly"]
     
-    Step3["<b>STEP 3: KERAS CORE LAYER</b><br/><br/>1. Ensures model is built<br/><br/>2. Detects dictionary inputs<br/><br/>3. Creates adapter<br/>Converts dict signature to list-based Functional model<br/><br/>4. Converts to TFLite<br/>(direct or wrapper-based fallback)<br/><br/>5. Saves .tflite file<br/><br/>6. Optional: AOT compilation for target hardware"]
+    Step3["<b>STEP 3: KERAS CORE LAYER</b><br/>(keras.src.export.litert)<br/><br/>1. Detects dictionary inputs<br/><br/>2. Creates adapter<br/>Converts dict signature to list-based Functional model<br/><br/>3. Converts to TFLite<br/>(direct or wrapper-based fallback)<br/><br/>4. Saves .tflite file<br/><br/>5. Optional: AOT compilation for target hardware"]
     
-    Step4["<b>STEP 4: OUTPUT</b><br/><br/>1. Dict->list conversion compiled into .tflite<br/>2. No weight duplication (adapter shares variables)<br/>3. Works for Task and Backbone models<br/>4. Automatic fallback strategies"]
+    Step4["<b>STEP 4: OUTPUT</b><br/><br/>1. Dict->list conversion compiled into .tflite<br/>2. No weight duplication (adapter shares variables)<br/>3. No wrapper classes - direct delegation<br/>4. Automatic fallback strategies"]
     
     Step1 --> Step2
     Step2 --> Step3
