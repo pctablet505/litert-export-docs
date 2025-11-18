@@ -196,9 +196,9 @@ The export system uses a **two-layer architecture** with clear separation of con
 flowchart TD
     A["<b>USER CODE</b><br/><br/>model.export('model.tflite', format='litert')"]
     
-    B["<b>KERAS-HUB LAYER</b><br/>Domain-specific configuration<br/><br/>• Config classes per model type<br/>(CausalLM, ImageClassifier, Seq2SeqLM, etc.)<br/><br/>• Input signature creation with defaults<br/>(sequence_length for text, image_size for vision)<br/><br/>• Model type detection via get_exporter_config()"]
+    B["<b>KERAS-HUB LAYER</b><br/>Domain-specific configuration<br/><br/>1. get_exporter_config(model)<br/>2. config.get_input_signature()<br/>3. Call Keras Core export_litert directly"]
     
-    C["<b>KERAS CORE LAYER</b><br/>Export mechanics<br/><br/>• Dict input detection and adapter creation<br/><br/>• TFLite conversion<br/>(direct or wrapper-based fallback)"]
+    C["<b>KERAS CORE LAYER</b><br/>Export mechanics (LiteRTExporter)<br/><br/>1. Infer input signature if not provided<br/>2. Create dict adapter if needed<br/>3. Try direct conversion (all model types)<br/>4. Fallback to wrapper on exception<br/>5. Runtime kwargs validation"]
     
     D["<b>OUTPUT</b><br/><br/>model.tflite (list-based interface)"]
     
@@ -226,6 +226,16 @@ flowchart TD
 
 5. **Registry Pattern:** Config selection based on model type (isinstance checks)
 
+6. **Runtime Validation:** Kwargs validated against converter attributes at runtime (no hardcoded lists)
+
+2. **Direct Delegation:** Keras-Hub config classes call Keras Core export_litert() directly (no wrapper classes)
+
+3. **Adapter Pattern:** Automatic dict->list conversion for TFLite compatibility
+
+4. **Universal Applicability:** Works for any Keras model with dict inputs (not just Keras-Hub)
+
+5. **Registry Pattern:** Config selection based on model type (isinstance checks)
+
 6. **Automatic Integration:** Configs auto-use preprocessor.sequence_length when available
 
 **Supported Model Types:**
@@ -236,7 +246,8 @@ flowchart TD
 
 * **Adapter Overhead:** The adapter wrapper only exists during export. The generated .tflite file contains the original model weights \- no runtime overhead.  
 *  **Backend Compatibility:** Models can be trained with any backend (JAX, PyTorch, TensorFlow) and saved to .keras format. However, for LiteRT export, the model must be loaded with TensorFlow backend during conversion. The exporter handles tensor conversion transparently, but TensorFlow backend is required for TFLite compatibility. If your model uses operations not available in TensorFlow, you'll get a conversion error.  
-* **Op Compatibility:** Check if your layers use [TFLite-supported operations](https://www.tensorflow.org/lite/guide/ops_compatibility). Unsupported ops will cause conversion errors. Enable verbose=True during export to see which ops are problematic.
+* **Op Compatibility:** Check if your layers use [TFLite-supported operations](https://www.tensorflow.org/lite/guide/ops_compatibility). Unsupported ops will cause conversion errors.
+* **Kwargs Validation:** All export kwargs are validated at runtime against TFLite converter attributes. Unknown attributes raise `ValueError` with a list of valid options.
 
 ### 4.2 Keras Core Implementation
 
@@ -254,23 +265,26 @@ Location: `keras/src/export/litert.py`
 
 ```mermaid
 flowchart TD
-    A["export_litert(model, filepath, input_signature)"]
-    B["1. Infer input signature if not provided<br/>• Check _inputs_struct for dict inputs<br/>• Fall back to model.inputs"]
-    C["2. Detect dictionary inputs<br/>(_has_dict_inputs)<br/>• Check model.inputs type<br/>• Check _inputs_struct<br/>• Check provided input_signature"]
-    D["3. If dict inputs: Create adapter<br/>(_create_dict_adapter)<br/>• Create Input layers for list inputs<br/>• Convert list->dict internally<br/>• Wrap original model"]
-    E["4. Convert to TFLite<br/>(_convert_to_tflite)<br/>• Try direct conversion first<br/>• Fall back to wrapper-based conversion if needed"]
-    F["5. Save .tflite file"]
+    A["export_litert(model, filepath, input_signature, **kwargs)"]
+    B["LiteRTExporter.__init__<br/>Store model, input_signature, kwargs"]
+    C["LiteRTExporter.export()<br/><br/>1. Infer input signature if None<br/>• Try _infer_dict_input_signature()<br/>• Fall back to get_input_signature()"]
+    D["2. Check for dict inputs<br/>isinstance(input_signature, dict)"]
+    E["3. If dict: Create adapter<br/>_create_dict_adapter()<br/>• Input layers (list)<br/>• Map to dict<br/>• Call original model<br/>• Return Functional model"]
+    F["4. Convert to TFLite<br/>_convert_to_tflite()<br/><br/>Try: Direct conversion<br/>Except: _convert_with_wrapper()"]
+    G["5. Apply converter kwargs<br/>_apply_converter_kwargs()<br/>• Runtime validation<br/>• ValueError for unknown attrs"]
+    H["6. Save .tflite file"]
     
     A --> B
     B --> C
     C --> D
     D --> E
     E --> F
+    F --> G
+    G --> H
     
     style A fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    style C fill:#fff9c4,stroke:#f57f17,stroke-width:2px
-    style D fill:#fff9c4,stroke:#f57f17,stroke-width:2px
-    style E fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style F fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style G fill:#ffebee,stroke:#c62828,stroke-width:2px
 ```
 
 ### 4.3 Input Signature Strategy by Model Type
@@ -291,69 +305,131 @@ Functional models with dictionary inputs require special handling: the signature
 
 ```mermaid
 flowchart TD
-    A["Model (any type)"]
-    B["STEP 1: Try Direct Conversion<br/>(all models)"]
-    C["TFLiteConverter.from_keras_model(model)"]
-    D["Set supported ops<br/>(TFLite + TF Select)"]
-    E["converter.convert()"]
+    A["Model with input_signature"]
+    B["Dict inputs?"]
+    C["Create dict adapter<br/>_create_dict_adapter()<br/><br/>List inputs → Dict → Model"]
+    D["Use model as-is"]
+    E["Try Direct Conversion<br/>TFLiteConverter.from_keras_model()"]
     F{Success?}
-    G["Return bytes"]
-    H["STEP 2: Wrapper-based Conversion<br/>(fallback)"]
-    I["Wrap model in tf.Module"]
-    J["Add @tf.function signature"]
-    K["Handle backend tensor conversion"]
-    L["TFLiteConverter.from_concrete_functions()"]
+    G["Apply converter kwargs<br/>_apply_converter_kwargs()<br/><br/>Runtime validation"]
+    H["Return TFLite bytes"]
+    I["Fallback: Wrapper Conversion<br/>_convert_with_wrapper()<br/><br/>@tf.function + concrete_functions"]
     
     A --> B
-    B --> C
-    C --> D
+    B -->|Yes| C
+    B -->|No| D
+    C --> E
     D --> E
     E --> F
     F -->|Yes| G
-    F -->|No| H
-    H --> I
-    I --> J
-    J --> K
-    K --> L
+    F -->|Exception| I
+    G --> H
+    I --> G
     
     style A fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    style B fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    style F fill:#ffebee,stroke:#c62828,stroke-width:2px
-    style G fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
-    style H fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style B fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style E fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+    style I fill:#ffebee,stroke:#c62828,stroke-width:2px
+    style G fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
 ```
 
-**Important:** The code first tries direct conversion of all model types (Functional, Sequential, and Subclassed). Wrapper-based conversion is only used as a fallback if direct conversion fails.
+**Key Points:**
+
+1. **Direct Conversion First:** All models (Functional, Sequential, Subclassed) attempt direct conversion via `TFLiteConverter.from_keras_model()`
+2. **Wrapper as Fallback:** Only used when direct conversion raises an exception
+3. **Dict Adapter:** Created before conversion if input signature is a dict; adapter converts list→dict at runtime
+4. **Runtime Validation:** `_apply_converter_kwargs()` validates all kwargs against converter attributes, raising `ValueError` for unknown attributes
 
 **Why Two Strategies?**
 
 1. **Direct Conversion (attempted first):**  
    * Simpler and faster path  
-   * Works for most well-formed models  
-   * TFLite converter directly inspects Keras model structure  
+   * Works for most models on TensorFlow 2.16+
+   * Converter directly inspects Keras model structure
+   * Sets `experimental_enable_resource_variables = True` for Keras 3 compatibility
 2. **Wrapper-based (fallback when direct fails):**  
-   * Required when direct conversion encounters errors  
-   * Provides explicit concrete function with @tf.function  
-   * Handles edge cases and complex model structures  
-   * Multiple retry strategies for better compatibility
+   * Required when direct conversion raises exceptions
+   * Creates explicit `@tf.function` with concrete function signature
+   * Handles SavedModel serialization errors with dict inputs
+   * Provides more robust conversion for edge cases
 
 #### 4.4.1 Wrapper-Based Conversion
 
-**What it is:** A `tf.Module` that wraps the model with an explicit `@tf.function(input_signature=...)`, creating a concrete computation graph that TFLite can reliably convert.
+**What it is:** Creates a `@tf.function` wrapper with explicit input signature, then converts via `TFLiteConverter.from_concrete_functions()`.
 
-**Why needed:** Direct conversion (`TFLiteConverter.from_keras_model()`) can fail even for TensorFlow backend models due to:
-- SavedModel serialization errors with dictionary inputs (`_DictWrapper` error)
-- Subclassed models where TFLite cannot introspect the call signature
-- Complex control flow or dynamic behavior that breaks automatic graph tracing
+**Why needed:** Direct conversion can fail for:
+- SavedModel serialization errors with dictionary inputs
+- Subclassed models where TFLite cannot introspect call signature
+- Complex control flow or dynamic behavior
 
-**How it works:** Instead of `TFLiteConverter.from_keras_model()`, the exporter:
-1. Creates a `tf.Module` wrapper that prevents `_DictWrapper` tracking errors
-2. Generates a concrete function with explicit `tf.TensorSpec` via `@tf.function.get_concrete_function()`
-3. Converts using `TFLiteConverter.from_concrete_functions([concrete_fn])`
+**How it works:**
+1. Normalizes input_signature to list of TensorSpec
+2. Creates `@tf.function` wrapper: `model_fn(*args) = model(*args)`
+3. Gets concrete function: `model_fn.get_concrete_function(*tensor_specs)`
+4. Converts using `TFLiteConverter.from_concrete_functions([concrete_fn], model)`
+5. Applies same converter settings (supported_ops, experimental_enable_resource_variables, kwargs)
 
-**When invoked:** Automatically as fallback when direct conversion fails. Transparent to users regardless of backend.
+**When invoked:** Automatically as fallback when direct conversion raises an exception.
 
-**Key advantage:** Enables conversion of models with dictionary inputs or complex structures that cause SavedModel serialization errors. No runtime overhead—wrapper exists only during export.
+#### 4.4.2 Runtime Kwargs Validation
+
+**Purpose:** Ensure all export kwargs are valid TFLite converter attributes without hardcoding attribute lists.
+
+**Implementation in `_apply_converter_kwargs()`:**
+
+```python
+def _apply_converter_kwargs(self, converter):
+    """Apply additional converter settings from kwargs with runtime validation."""
+    for attr, value in self.kwargs.items():
+        if attr == "target_spec" and isinstance(value, dict):
+            # Handle nested target_spec dict
+            for spec_key, spec_value in value.items():
+                if hasattr(converter.target_spec, spec_key):
+                    setattr(converter.target_spec, spec_key, spec_value)
+                else:
+                    # List valid target_spec attributes dynamically
+                    valid = [a for a in dir(converter.target_spec) if not a.startswith("_")]
+                    raise ValueError(
+                        f"Unknown target_spec attribute '{spec_key}'. "
+                        f"Valid attributes: {valid}"
+                    )
+        elif hasattr(converter, attr):
+            setattr(converter, attr, value)
+        else:
+            # List valid converter attributes dynamically
+            valid = [a for a in dir(converter) if not a.startswith("_")]
+            raise ValueError(
+                f"Unknown converter attribute '{attr}'. "
+                f"Valid attributes: {valid}"
+            )
+```
+
+**Key Benefits:**
+
+1. **Future-proof:** Automatically adapts to new TensorFlow versions when new converter attributes are added
+2. **Clear errors:** When invalid kwargs provided, raises `ValueError` with complete list of valid options
+3. **No maintenance:** No hardcoded attribute lists to keep in sync with TensorFlow releases
+4. **Nested support:** Handles both top-level converter attrs and nested `target_spec` dict
+
+**Example Usage:**
+
+```python
+# Valid kwargs - pass through to converter
+model.export(
+    "model.tflite",
+    format="litert",
+    optimizations=[tf.lite.Optimize.DEFAULT],  # Valid converter attr
+    target_spec={"supported_types": [tf.float16]}  # Valid nested target_spec
+)
+
+# Invalid kwarg - raises clear error
+model.export(
+    "model.tflite",
+    format="litert",
+    verbose=True  # ❌ ValueError: Unknown converter attribute 'verbose'
+                  # Valid attributes: ['optimizations', 'target_spec', ...]
+)
+```
 
 ### 4.5 Keras-Hub Integration
 
@@ -383,21 +459,21 @@ Keras-Hub uses **one config class per model type** (not per model instance). All
 
 ```mermaid
 flowchart TB
-    A["User calls model.export()"]
-    B["Task.export() in task.py"]
+    A["User calls model.export('model.tflite', format='litert')"]
+    B["Keras-Hub: export_litert() wrapper"]
     C["get_exporter_config(model)"]
-    D["Detect Model Type via isinstance()"]
+    D["Model Type Detection<br/>isinstance() checks with priority"]
     
     E1["CausalLMExporterConfig"]
     E2["TextClassifierExporterConfig"]
     E3["ImageClassifierExporterConfig"]
     E4["Seq2SeqLMExporterConfig"]
-    E5["ObjectDetectorExporterConfig"]
-    E6["Other configs..."]
+    E5["MultimodalExporterConfig"]
+    E6["Other task configs..."]
     
-    F["Config.get_input_signature()<br/>(auto-uses preprocessor settings)"]
-    G["Keras Core export_litert()"]
-    H["Dict→list adapter + TFLite conversion"]
+    F["config.get_input_signature(**kwargs)<br/><br/>Auto-uses preprocessor.sequence_length<br/>when parameters not provided"]
+    G["Keras Core export_litert()<br/>(model, filepath, input_signature, **kwargs)"]
+    H["LiteRTExporter<br/><br/>1. Dict adapter if needed<br/>2. Direct conversion (try)<br/>3. Wrapper fallback (except)<br/>4. Runtime kwargs validation"]
     
     A --> B
     B --> C
