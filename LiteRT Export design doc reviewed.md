@@ -337,6 +337,24 @@ flowchart TD
    * Handles edge cases and complex model structures  
    * Multiple retry strategies for better compatibility
 
+#### 4.4.1 Wrapper-Based Conversion
+
+**What it is:** A `tf.Module` that wraps the model with an explicit `@tf.function(input_signature=...)`, creating a concrete computation graph that TFLite can reliably convert.
+
+**Why needed:** Direct conversion (`TFLiteConverter.from_keras_model()`) can fail even for TensorFlow backend models due to:
+- SavedModel serialization errors with dictionary inputs (`_DictWrapper` error)
+- Subclassed models where TFLite cannot introspect the call signature
+- Complex control flow or dynamic behavior that breaks automatic graph tracing
+
+**How it works:** Instead of `TFLiteConverter.from_keras_model()`, the exporter:
+1. Creates a `tf.Module` wrapper that prevents `_DictWrapper` tracking errors
+2. Generates a concrete function with explicit `tf.TensorSpec` via `@tf.function.get_concrete_function()`
+3. Converts using `TFLiteConverter.from_concrete_functions([concrete_fn])`
+
+**When invoked:** Automatically as fallback when direct conversion fails. Transparent to users regardless of backend.
+
+**Key advantage:** Enables conversion of models with dictionary inputs or complex structures that cause SavedModel serialization errors. No runtime overhead—wrapper exists only during export.
+
 ### 4.5 Keras-Hub Integration
 
 **Location:** `keras_hub/src/export/`
