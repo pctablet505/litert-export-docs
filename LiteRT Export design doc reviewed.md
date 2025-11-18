@@ -149,17 +149,26 @@ model.export("model.tflite", format="litert")
 
 ### 2.3 Key Challenges
 
-* **Dictionary Input Problem:** KerasHub models expect dictionary inputs like `{"token_ids": [...], "padding_mask": [...]}`, but TFLite requires positional list inputs  
-* **Multi-Backend Compatibility:** Models trained with JAX or PyTorch backends on keras need TensorFlow conversion for TFLite.  
-  For non keras solutions, there are open source tools for conversion to .tflite  
-  1. [GitHub \- google-ai-edge/ai-edge-torch: Supporting PyTorch models with the Google AI Edge TFLite runtime.](https://github.com/google-ai-edge/ai-edge-torch) This is open source and directly converts to .tflite without need for tensorflow.  
-  2. [AI Edge JAX](https://g3doc.corp.google.com/third_party/py/ai_edge_jax/g3doc/index.md?cl=head) **Google internal** solution to convert jax model to .tflite  
-* For keras we have below solutions for different backend.  
-1. Tensorflow: to use some wrapper over model call function, convert to tf concrete function, and use `tf.lite.TFLiteConverter` to generate the .tflite file.  
-2. Jax: to use JAX module from orbax-export library, to convert the model graph to tf concrete function, then use tf.lite.TFLiteConverter to convert to .tflite .  
-3. Torch: We need to convert the model to torch module, then use AI-Edge-Torch to generate the .tflite file.   
-* **Input Signature Inference:** Different model types (Functional, Sequential, Subclassed) have different ways to introspect input shapes  
+* **Dictionary Input Problem:** KerasHub models expect dictionary inputs like `{"token_ids": [...], "padding_mask": [...]}`, but TFLite requires positional list inputs
+  - **Solution:** Create a Functional model adapter that wraps the original model, converting list inputs to dict inputs
+  - The adapter shares weights with the original model (no duplication)
+  - This approach is necessary because `TFLiteConverter.from_keras_model()` requires a model with list-based inputs
+
+* **Multi-Backend Compatibility:** Models trained with JAX or PyTorch backends need conversion to TensorFlow format for TFLite export
+  - **Current Status:** TensorFlow backend fully supported
+  - **JAX Backend (Future Work):** Will wrap JAX models into TF concrete functions before TFLite conversion, similar to the dict adapter approach but for cross-backend compatibility
+  - **PyTorch Backend (Future Work):** Will convert models to PyTorch modules and use [AI-Edge-Torch](https://github.com/google-ai-edge/ai-edge-torch) for direct .tflite conversion
+
+* **Non-Keras Alternatives:** For non-Keras workflows, standalone tools exist:
+  1. [AI-Edge-Torch](https://github.com/google-ai-edge/ai-edge-torch): Direct PyTorch to TFLite conversion (no TensorFlow needed)
+  2. [AI Edge JAX](https://g3doc.corp.google.com/third_party/py/ai_edge_jax/g3doc/index.md?cl=head): Google internal JAX to TFLite solution
+
+* **Input Signature Inference:** Different model types (Functional, Sequential, Subclassed) have different ways to introspect input shapes
+  - Functional/Sequential: Can read from `model.inputs`
+  - Subclassed: Requires model to be built first
+
 * **Code Organization:** Avoid duplication between Keras Core and KerasHub implementations
+  - Solution: Keras-Hub only provides input signatures, all conversion logic in Keras Core
 
 ## 3\. Goals
 
@@ -198,7 +207,7 @@ flowchart TD
     
     B["<b>KERAS-HUB LAYER</b><br/>Domain-specific configuration<br/><br/>1. get_exporter_config(model)<br/>2. config.get_input_signature()<br/>3. Call Keras Core export_litert directly"]
     
-    C["<b>KERAS CORE LAYER</b><br/>Export mechanics (LiteRTExporter)<br/><br/>1. Infer input signature if not provided<br/>2. Create dict adapter if needed<br/>3. Try direct conversion (all model types)<br/>4. Fallback to wrapper on exception<br/>5. Runtime kwargs validation"]
+    C["<b>KERAS CORE LAYER</b><br/>Export mechanics (LiteRTExporter)<br/><br/>1. Infer input signature if not provided<br/>2. Create dict adapter if needed<br/>3. Direct conversion only"]
     
     D["<b>OUTPUT</b><br/><br/>model.tflite (list-based interface)"]
     
@@ -226,16 +235,6 @@ flowchart TD
 
 5. **Registry Pattern:** Config selection based on model type (isinstance checks)
 
-6. **Runtime Validation:** Kwargs validated against converter attributes at runtime (no hardcoded lists)
-
-2. **Direct Delegation:** Keras-Hub config classes call Keras Core export_litert() directly (no wrapper classes)
-
-3. **Adapter Pattern:** Automatic dict->list conversion for TFLite compatibility
-
-4. **Universal Applicability:** Works for any Keras model with dict inputs (not just Keras-Hub)
-
-5. **Registry Pattern:** Config selection based on model type (isinstance checks)
-
 6. **Automatic Integration:** Configs auto-use preprocessor.sequence_length when available
 
 **Supported Model Types:**
@@ -247,7 +246,7 @@ flowchart TD
 * **Adapter Overhead:** The adapter wrapper only exists during export. The generated .tflite file contains the original model weights \- no runtime overhead.  
 *  **Backend Compatibility:** Models can be trained with any backend (JAX, PyTorch, TensorFlow) and saved to .keras format. However, for LiteRT export, the model must be loaded with TensorFlow backend during conversion. The exporter handles tensor conversion transparently, but TensorFlow backend is required for TFLite compatibility. If your model uses operations not available in TensorFlow, you'll get a conversion error.  
 * **Op Compatibility:** Check if your layers use [TFLite-supported operations](https://www.tensorflow.org/lite/guide/ops_compatibility). Unsupported ops will cause conversion errors.
-* **Kwargs Validation:** All export kwargs are validated at runtime against TFLite converter attributes. Unknown attributes raise `ValueError` with a list of valid options.
+* **JAX Backend Future Support:** Current implementation works with TensorFlow backend. For JAX backend support (planned future work), models will need to be wrapped into TF concrete functions before TFLite conversion, similar to the dict adapter approach but for cross-backend compatibility.
 
 ### 4.2 Keras Core Implementation
 
@@ -270,8 +269,8 @@ flowchart TD
     C["LiteRTExporter.export()<br/><br/>1. Infer input signature if None<br/>• Try _infer_dict_input_signature()<br/>• Fall back to get_input_signature()"]
     D["2. Check for dict inputs<br/>isinstance(input_signature, dict)"]
     E["3. If dict: Create adapter<br/>_create_dict_adapter()<br/>• Input layers (list)<br/>• Map to dict<br/>• Call original model<br/>• Return Functional model"]
-    F["4. Convert to TFLite<br/>_convert_to_tflite()<br/><br/>Try: Direct conversion<br/>Except: _convert_with_wrapper()"]
-    G["5. Apply converter kwargs<br/>_apply_converter_kwargs()<br/>• Runtime validation<br/>• ValueError for unknown attrs"]
+    F["4. Convert to TFLite<br/>_convert_to_tflite()<br/><br/>Direct conversion only<br/>Raise error on failure"]
+    G["5. Apply converter kwargs<br/>_apply_converter_kwargs()"]
     H["6. Save .tflite file"]
     
     A --> B
@@ -287,21 +286,91 @@ flowchart TD
     style G fill:#ffebee,stroke:#c62828,stroke-width:2px
 ```
 
-### 4.3 Input Signature Strategy by Model Type
+### 4.3 Dict Adapter: Converting Dict Inputs to TFLite-Compatible Format
 
-**CRITICAL: Functional Model Signature Wrapping**
+**The Problem:**
+- KerasHub models expect dictionary inputs: `model({'token_ids': [...], 'padding_mask': [...]})`
+- TFLite only supports positional (list) inputs: `model(input1, input2, ...)`
+- Direct conversion fails because TFLite converter cannot handle dict-input models
 
-Functional models with dictionary inputs require special handling: the signature must be wrapped in a single-element list `[input_signature_dict]` rather than passed directly as a dict. This is because Functional models' call() signature expects one positional argument containing the full nested structure, not multiple positional arguments.
+**The Solution: Functional Model Wrapper**
 
-**Design Decision:** Different model types have different call signatures, requiring type-specific handling.
+```mermaid
+flowchart TD
+    A["Original Model<br/>model({'token_ids': [...], 'padding_mask': [...]})"]
+    
+    B["Dict Adapter Creation<br/>_create_dict_adapter()"]
+    
+    C["Input Layers<br/>Input(shape=..., name='token_ids')<br/>Input(shape=..., name='padding_mask')"]
+    
+    D["List → Dict Mapping<br/>inputs_dict = {<br/>'token_ids': input_layer1,<br/>'padding_mask': input_layer2<br/>}"]
+    
+    E["Call Original Model<br/>outputs = model(inputs_dict)"]
+    
+    F["Functional Model Wrapper<br/>adapted_model = Model(<br/>inputs=[input_layer1, input_layer2],<br/>outputs=outputs<br/>)"]
+    
+    G["Weight Sharing<br/>adapted_model._variables = model.variables<br/>(no duplication)"]
+    
+    H["TFLite Compatible<br/>adapted_model(input1, input2)<br/>→ internally converts to dict<br/>→ calls original model"]
+    
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    
+    style A fill:#ffebee,stroke:#c62828,stroke-width:2px
+    style H fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+    style B fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style F fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+```
 
-| Model Type | Signature Format | Reason | Auto-Inference? |
-| :---- | :---- | :---- | :---- |
-| **Functional** | Single-element list \[nested\_inputs\] | call() expects one positional arg with full structure | Yes (from model.inputs) |
-| **Sequential** | Flat list \[input1, input2, ...\] | call() maps over inputs directly | Yes (from model.inputs) |
-| **Subclassed** | Inferred from first call | Dynamic call() signature not statically known | Only if model built |
+**Key Transformation Steps:**
 
-### 4.4 Conversion Strategy Decision Tree
+1. **Input Layer Creation:** One `Input()` layer per dict key with matching shapes and dtypes
+2. **List-to-Dict Mapping:** Positional arguments get mapped back to dictionary structure
+3. **Model Wrapping:** Original model called with reconstructed dict inputs
+4. **Functional API:** Creates traceable computational graph from list inputs to outputs
+5. **Weight Sharing:** Variable references copied (zero memory overhead)
+
+**Why This Works:**
+
+1. **Functional API Compatibility:** `TFLiteConverter.from_keras_model()` understands Functional models with list inputs
+2. **Computational Graph:** The Functional model creates a traceable graph from list inputs through dict conversion to outputs
+3. **Weight Sharing:** By copying variable references (not values), the adapter adds zero memory overhead
+4. **Automatic Conversion:** TFLite compiler includes the dict-to-list conversion in the final .tflite graph
+
+**Result:**
+- Original model: `model({'token_ids': x, 'padding_mask': y})` ❌ Can't convert to TFLite
+- Adapted model: `model(x, y)` → internally converts to dict → calls original model ✅ TFLite compatible
+
+### 4.4 Input Signature Inference
+
+The exporter automatically infers input signatures from the model structure when not explicitly provided.
+
+**Inference Strategy:**
+
+1. **Dict-specific inference** (`_infer_dict_input_signature()`):
+   - Checks `model._inputs_struct` first (preserves dict structure for models with dict inputs)
+   - Falls back to `model.inputs` if it's a dict
+   - Returns `None` if neither is a dict
+
+2. **Standard inference** (`get_input_signature()`):
+   - Used when dict inference returns `None`
+   - Inspects model structure (Functional, Sequential, or Subclassed)
+   - Extracts shapes and dtypes from model.inputs
+
+**Model Type Support:**
+
+| Model Type | Auto-Inference | Input Format |
+| :---- | :---- | :---- |
+| **Functional** | Yes (from model.inputs) | Dict or list, handled automatically |
+| **Sequential** | Yes (from model.inputs) | List of inputs |
+| **Subclassed** | Only if model built | Varies by implementation |
+
+### 4.5 Conversion Strategy Decision Tree
 
 ```mermaid
 flowchart TD
@@ -309,11 +378,11 @@ flowchart TD
     B["Dict inputs?"]
     C["Create dict adapter<br/>_create_dict_adapter()<br/><br/>List inputs → Dict → Model"]
     D["Use model as-is"]
-    E["Try Direct Conversion<br/>TFLiteConverter.from_keras_model()"]
+    E["Direct Conversion<br/>TFLiteConverter.from_keras_model()"]
     F{Success?}
     G["Apply converter kwargs<br/>_apply_converter_kwargs()<br/><br/>Runtime validation"]
     H["Return TFLite bytes"]
-    I["Fallback: Wrapper Conversion<br/>_convert_with_wrapper()<br/><br/>@tf.function + concrete_functions"]
+    I["Raise RuntimeError<br/>with detailed message"]
     
     A --> B
     B -->|Yes| C
@@ -324,7 +393,6 @@ flowchart TD
     F -->|Yes| G
     F -->|Exception| I
     G --> H
-    I --> G
     
     style A fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
     style B fill:#fff9c4,stroke:#f57f17,stroke-width:2px
@@ -335,103 +403,39 @@ flowchart TD
 
 **Key Points:**
 
-1. **Direct Conversion First:** All models (Functional, Sequential, Subclassed) attempt direct conversion via `TFLiteConverter.from_keras_model()`
-2. **Wrapper as Fallback:** Only used when direct conversion raises an exception
-3. **Dict Adapter:** Created before conversion if input signature is a dict; adapter converts list→dict at runtime
-4. **Runtime Validation:** `_apply_converter_kwargs()` validates all kwargs against converter attributes, raising `ValueError` for unknown attributes
+1. **Direct Conversion Only:** All models (Functional, Sequential, Subclassed) use direct conversion via `TFLiteConverter.from_keras_model()`
+2. **No Fallback:** If conversion fails, raises `RuntimeError` with helpful error message
+3. **Dict Adapter Creates Functional Model:** When dict inputs are detected, creates a new Functional model wrapper that:
+   - Takes list inputs (TFLite-compatible positional arguments)
+   - Internally converts list → dict using Input layers
+   - Calls the original model with dict inputs
+   - Returns the model's outputs
+   - Shares weights with original model (no duplication via variable references)
 
-**Why Two Strategies?**
+**Why Dict Adapter Creates Functional Model:**
 
-1. **Direct Conversion (attempted first):**  
-   * Simpler and faster path  
-   * Works for most models on TensorFlow 2.16+
-   * Converter directly inspects Keras model structure
-   * Sets `experimental_enable_resource_variables = True` for Keras 3 compatibility
-2. **Wrapper-based (fallback when direct fails):**  
-   * Required when direct conversion raises exceptions
-   * Creates explicit `@tf.function` with concrete function signature
-   * Handles SavedModel serialization errors with dict inputs
-   * Provides more robust conversion for edge cases
-
-#### 4.4.1 Wrapper-Based Conversion
-
-**What it is:** Creates a `@tf.function` wrapper with explicit input signature, then converts via `TFLiteConverter.from_concrete_functions()`.
-
-**Why needed:** Direct conversion can fail for:
-- SavedModel serialization errors with dictionary inputs
-- Subclassed models where TFLite cannot introspect call signature
-- Complex control flow or dynamic behavior
-
-**How it works:**
-1. Normalizes input_signature to list of TensorSpec
-2. Creates `@tf.function` wrapper: `model_fn(*args) = model(*args)`
-3. Gets concrete function: `model_fn.get_concrete_function(*tensor_specs)`
-4. Converts using `TFLiteConverter.from_concrete_functions([concrete_fn], model)`
-5. Applies same converter settings (supported_ops, experimental_enable_resource_variables, kwargs)
-
-**When invoked:** Automatically as fallback when direct conversion raises an exception.
-
-#### 4.4.2 Runtime Kwargs Validation
-
-**Purpose:** Ensure all export kwargs are valid TFLite converter attributes without hardcoding attribute lists.
-
-**Implementation in `_apply_converter_kwargs()`:**
+The adapter is not just a passthrough - it's a **structural transformation**:
 
 ```python
-def _apply_converter_kwargs(self, converter):
-    """Apply additional converter settings from kwargs with runtime validation."""
-    for attr, value in self.kwargs.items():
-        if attr == "target_spec" and isinstance(value, dict):
-            # Handle nested target_spec dict
-            for spec_key, spec_value in value.items():
-                if hasattr(converter.target_spec, spec_key):
-                    setattr(converter.target_spec, spec_key, spec_value)
-                else:
-                    # List valid target_spec attributes dynamically
-                    valid = [a for a in dir(converter.target_spec) if not a.startswith("_")]
-                    raise ValueError(
-                        f"Unknown target_spec attribute '{spec_key}'. "
-                        f"Valid attributes: {valid}"
-                    )
-        elif hasattr(converter, attr):
-            setattr(converter, attr, value)
-        else:
-            # List valid converter attributes dynamically
-            valid = [a for a in dir(converter) if not a.startswith("_")]
-            raise ValueError(
-                f"Unknown converter attribute '{attr}'. "
-                f"Valid attributes: {valid}"
-            )
-```
+# Original model expects dict inputs
+original_model({'token_ids': [...], 'padding_mask': [...]})
 
-**Key Benefits:**
-
-1. **Future-proof:** Automatically adapts to new TensorFlow versions when new converter attributes are added
-2. **Clear errors:** When invalid kwargs provided, raises `ValueError` with complete list of valid options
-3. **No maintenance:** No hardcoded attribute lists to keep in sync with TensorFlow releases
-4. **Nested support:** Handles both top-level converter attrs and nested `target_spec` dict
-
-**Example Usage:**
-
-```python
-# Valid kwargs - pass through to converter
-model.export(
-    "model.tflite",
-    format="litert",
-    optimizations=[tf.lite.Optimize.DEFAULT],  # Valid converter attr
-    target_spec={"supported_types": [tf.float16]}  # Valid nested target_spec
+# Adapter wraps it into Functional model accepting list inputs
+adapted_model = Model(
+    inputs=[input_layer1, input_layer2],  # List inputs
+    outputs=original_model({'token_ids': input_layer1, 'padding_mask': input_layer2})
 )
 
-# Invalid kwarg - raises clear error
-model.export(
-    "model.tflite",
-    format="litert",
-    verbose=True  # ❌ ValueError: Unknown converter attribute 'verbose'
-                  # Valid attributes: ['optimizations', 'target_spec', ...]
-)
+# TFLite converter can now work with list-based interface
+TFLiteConverter.from_keras_model(adapted_model)
 ```
 
-### 4.5 Keras-Hub Integration
+This transformation is **required** because:
+- TFLite only understands positional (list) inputs
+- The Functional API creates a traceable computational graph
+- `TFLiteConverter.from_keras_model()` can introspect Functional models properly
+
+### 4.6 Keras-Hub Integration
 
 **Location:** `keras_hub/src/export/`
 
@@ -445,7 +449,7 @@ keras_hub/src/export/
 └── __init__.py        # Public API exports
 ```
 
-#### 4.5.1 Configuration System
+#### 4.6.1 Configuration System
 
 **Purpose:** Configs provide **domain-specific metadata** that can't be inferred from model structure:
 - Input names (`token_ids` vs `encoder_token_ids`)
@@ -473,7 +477,7 @@ flowchart TB
     
     F["config.get_input_signature(**kwargs)<br/><br/>Auto-uses preprocessor.sequence_length<br/>when parameters not provided"]
     G["Keras Core export_litert()<br/>(model, filepath, input_signature, **kwargs)"]
-    H["LiteRTExporter<br/><br/>1. Dict adapter if needed<br/>2. Direct conversion (try)<br/>3. Wrapper fallback (except)<br/>4. Runtime kwargs validation"]
+    H["LiteRTExporter<br/><br/>1. Dict adapter if needed<br/>2. Direct conversion only<br/>3. Runtime kwargs validation"]
     
     A --> B
     B --> C
@@ -512,7 +516,7 @@ flowchart TB
 - **Multimodal:** Gemma3, PaliGemma, CLIP
 - **Generative:** TextToImage (Stable Diffusion)
 
-#### 4.5.2 Input Signature Construction
+#### 4.6.2 Input Signature Construction
 
 Each config implements `get_input_signature()` to create proper input specs:
 
@@ -554,7 +558,7 @@ InputSpec(dtype="float32", shape=(None, height, width, 3), name="inputs")
 }
 ```
 
-#### 4.5.3 Key Features
+#### 4.6.3 Key Features
 
 **Why separate configs per model type?** Each type needs different domain knowledge:
 - Text: `sequence_length` parameter → inject into shape[1]
@@ -573,7 +577,7 @@ InputSpec(dtype="float32", shape=(None, height, width, 3), name="inputs")
 - Keras-Hub: Provides domain knowledge (input signatures with automatic preprocessor defaults)
 - Keras Core: Handles all export mechanics (dict conversion, TFLite compilation)
 
-### 4.6 Complete Export Pipeline
+### 4.7 Complete Export Pipeline
 
 The complete export flow from user code to deployed .tflite file:
 
@@ -583,9 +587,9 @@ flowchart TD
     
     Step2["<b>STEP 2: KERAS-HUB LAYER</b><br/>(configs.py + task.py)<br/><br/>1. Task.export() detects format='litert'<br/><br/>2. Gets config via get_exporter_config(model)<br/><br/>3. Config generates input signature<br/>(auto-uses preprocessor.sequence_length if available)<br/><br/>4. Calls Keras Core export_litert() directly"]
     
-    Step3["<b>STEP 3: KERAS CORE LAYER</b><br/>(keras.src.export.litert)<br/><br/>1. Detects dictionary inputs<br/><br/>2. Creates adapter<br/>Converts dict signature to list-based Functional model<br/><br/>3. Converts to TFLite<br/>(direct or wrapper-based fallback)<br/><br/>4. Saves .tflite file"]
+    Step3["<b>STEP 3: KERAS CORE LAYER</b><br/>(keras.src.export.litert)<br/><br/>1. Detects dictionary inputs<br/><br/>2. Creates adapter<br/>Converts dict signature to list-based Functional model<br/><br/>3. Converts to TFLite<br/>(direct conversion only)<br/><br/>4. Saves .tflite file"]
     
-    Step4["<b>STEP 4: OUTPUT</b><br/><br/>1. Dict->list conversion compiled into .tflite<br/>2. No weight duplication (adapter shares variables)<br/>3. No wrapper classes - direct delegation<br/>4. Automatic fallback strategies"]
+    Step4["<b>STEP 4: OUTPUT</b><br/><br/>1. Dict->list conversion compiled into .tflite<br/>2. No weight duplication (adapter shares variables)<br/>3. No wrapper classes - direct delegation<br/>4. Positional inputs for TFLite compatibility"]
     
     Step1 --> Step2
     Step2 --> Step3
