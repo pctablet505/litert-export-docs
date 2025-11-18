@@ -264,12 +264,12 @@ Location: `keras/src/export/litert.py`
 
 ```mermaid
 flowchart TD
-    A["export_litert(model, filepath, input_signature, **kwargs)"]
+    A["export_litert(model, filepath,<br/>input_signature, **kwargs)"]
     B["LiteRTExporter.__init__<br/>Store model, input_signature, kwargs"]
-    C["LiteRTExporter.export()<br/><br/>1. Infer input signature if None<br/>• Try _infer_dict_input_signature()<br/>• Fall back to get_input_signature()"]
+    C["<b>LiteRTExporter.export()</b><br/><br/>1. Infer input signature if None<br/>• Try _infer_dict_input_signature()<br/>• Fall back to get_input_signature()"]
     D["2. Check for dict inputs<br/>isinstance(input_signature, dict)"]
-    E["3. If dict: Create adapter<br/>_create_dict_adapter()<br/>• Input layers (list)<br/>• Map to dict<br/>• Call original model<br/>• Return Functional model"]
-    F["4. Convert to TFLite<br/>_convert_to_tflite()<br/><br/>Direct conversion only<br/>Raise error on failure"]
+    E["<b>3. If dict: Create adapter</b><br/>_create_dict_adapter()<br/>• Input layers (list)<br/>• Map to dict<br/>• Call original model<br/>• Return Functional model"]
+    F["<b>4. Convert to TFLite</b><br/>_convert_to_tflite()<br/><br/>Direct conversion only<br/>Raise error on failure"]
     G["5. Apply converter kwargs<br/>_apply_converter_kwargs()"]
     H["6. Save .tflite file"]
     
@@ -297,21 +297,21 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["Original Model<br/>model({'token_ids': [...], 'padding_mask': [...]})"]
+    A["<b>Original Model</b><br/>model({'token_ids': [...],<br/>'padding_mask': [...]})"]
     
-    B["Dict Adapter Creation<br/>_create_dict_adapter()"]
+    B["<b>Dict Adapter Creation</b><br/>_create_dict_adapter()"]
     
-    C["Input Layers<br/>Input(shape=..., name='token_ids')<br/>Input(shape=..., name='padding_mask')"]
+    C["<b>Input Layers</b><br/>Input(shape=..., name='token_ids')<br/>Input(shape=..., name='padding_mask')"]
     
-    D["List → Dict Mapping<br/>inputs_dict = {<br/>'token_ids': input_layer1,<br/>'padding_mask': input_layer2<br/>}"]
+    D["<b>List → Dict Mapping</b><br/>inputs_dict = {<br/>'token_ids': input_layer1,<br/>'padding_mask': input_layer2<br/>}"]
     
-    E["Call Original Model<br/>outputs = model(inputs_dict)"]
+    E["<b>Call Original Model</b><br/>outputs = model(inputs_dict)"]
     
-    F["Functional Model Wrapper<br/>adapted_model = Model(<br/>inputs=[input_layer1, input_layer2],<br/>outputs=outputs<br/>)"]
+    F["<b>Functional Model Wrapper</b><br/>adapted_model = Model(<br/>inputs=[input_layer1, input_layer2],<br/>outputs=outputs<br/>)"]
     
-    G["Weight Sharing<br/>adapted_model._variables = model.variables<br/>(no duplication)"]
+    G["<b>Weight Sharing</b><br/>adapted_model._variables = model.variables<br/>(no duplication)"]
     
-    H["TFLite Compatible<br/>adapted_model(input1, input2)<br/>→ internally converts to dict<br/>→ calls original model"]
+    H["<b>TFLite Compatible</b><br/>adapted_model(input1, input2)<br/>→ internally converts to dict<br/>→ calls original model"]
     
     A --> B
     B --> C
@@ -375,14 +375,14 @@ The exporter automatically infers input signatures from the model structure when
 ```mermaid
 flowchart TD
     A["Model with input_signature"]
-    B["Dict inputs?"]
-    C["Create dict adapter<br/>_create_dict_adapter()<br/><br/>List inputs → Dict → Model"]
+    B["<b>Dict inputs?</b>"]
+    C["<b>Create dict adapter</b><br/>_create_dict_adapter()<br/><br/>List inputs → Dict → Model"]
     D["Use model as-is"]
-    E["Direct Conversion<br/>TFLiteConverter.from_keras_model()"]
+    E["<b>Direct Conversion</b><br/>TFLiteConverter.from_keras_model()"]
     F{Success?}
     G["Apply converter kwargs<br/>_apply_converter_kwargs()<br/><br/>Runtime validation"]
     H["Return TFLite bytes"]
-    I["Raise RuntimeError<br/>with detailed message"]
+    I["<b>Raise RuntimeError</b><br/>with detailed message"]
     
     A --> B
     B -->|Yes| C
@@ -475,9 +475,9 @@ flowchart TB
     E5["MultimodalExporterConfig"]
     E6["Other task configs..."]
     
-    F["config.get_input_signature(**kwargs)<br/><br/>Auto-uses preprocessor.sequence_length<br/>when parameters not provided"]
+    F["<b>config.get_input_signature(**kwargs)</b><br/><br/>Auto-uses preprocessor.sequence_length<br/>when parameters not provided"]
     G["Keras Core export_litert()<br/>(model, filepath, input_signature, **kwargs)"]
-    H["LiteRTExporter<br/><br/>1. Dict adapter if needed<br/>2. Direct conversion only<br/>3. Runtime kwargs validation"]
+    H["<b>LiteRTExporter</b><br/><br/>1. Dict adapter if needed<br/>2. Direct conversion only<br/>3. Runtime kwargs validation"]
     
     A --> B
     B --> C
@@ -585,11 +585,11 @@ The complete export flow from user code to deployed .tflite file:
 flowchart TD
     Step1["<b>STEP 1: USER CODE</b><br/><br/>model.export('model.tflite',<br/>format='litert',<br/>max_sequence_length=128)"]
     
-    Step2["<b>STEP 2: KERAS-HUB LAYER</b><br/>(configs.py + task.py)<br/><br/>1. Task.export() detects format='litert'<br/><br/>2. Gets config via get_exporter_config(model)<br/><br/>3. Config generates input signature<br/>(auto-uses preprocessor.sequence_length if available)<br/><br/>4. Calls Keras Core export_litert() directly"]
+    Step2["<b>STEP 2: KERAS-HUB LAYER</b><br/>(configs.py + task.py)<br/><br/>• Task.export() detects format='litert'<br/>• Gets config via get_exporter_config(model)<br/>• Config generates input signature<br/>• Auto-uses preprocessor.sequence_length<br/>• Calls Keras Core export_litert() directly"]
     
-    Step3["<b>STEP 3: KERAS CORE LAYER</b><br/>(keras.src.export.litert)<br/><br/>1. Detects dictionary inputs<br/><br/>2. Creates adapter<br/>Converts dict signature to list-based Functional model<br/><br/>3. Converts to TFLite<br/>(direct conversion only)<br/><br/>4. Saves .tflite file"]
+    Step3["<b>STEP 3: KERAS CORE LAYER</b><br/>(keras.src.export.litert)<br/><br/>• Detects dictionary inputs<br/>• Creates adapter (dict→list conversion)<br/>• Converts to TFLite (direct conversion only)<br/>• Saves .tflite file"]
     
-    Step4["<b>STEP 4: OUTPUT</b><br/><br/>1. Dict->list conversion compiled into .tflite<br/>2. No weight duplication (adapter shares variables)<br/>3. No wrapper classes - direct delegation<br/>4. Positional inputs for TFLite compatibility"]
+    Step4["<b>STEP 4: OUTPUT</b><br/><br/>• Dict→list conversion in .tflite<br/>• No weight duplication<br/>• Direct delegation (no wrapper classes)<br/>• Positional inputs for TFLite"]
     
     Step1 --> Step2
     Step2 --> Step3
