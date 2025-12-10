@@ -1,7 +1,7 @@
 # Keras LiteRT Export - User Guide
 
-**Version:** 1.0  
-**Last Updated:** November 13, 2025  
+**Version:** 2.0  
+**Last Updated:** 2025  
 **For:** Keras 3.x and Keras-Hub users
 
 ---
@@ -18,6 +18,7 @@
 8. [Mobile Deployment](#8-mobile-deployment)
 9. [Troubleshooting](#9-troubleshooting)
 10. [FAQ](#10-faq)
+11. [Developer Guide](#11-developer-guide-custom-models-and-advanced-usage)
 
 ---
 
@@ -25,7 +26,7 @@
 
 ### What is LiteRT Export?
 
-LiteRT (formerly TensorFlow Lite) export enables you to deploy Keras models on mobile, embedded, and edge devices. This guide covers the **one-line export API** introduced in Keras 3.x that makes mobile deployment as simple as:
+LiteRT (formerly TensorFlow Lite) export enables you to deploy Keras models on mobile, embedded, and edge devices. This guide covers the **one-line export API** in Keras 3.x that makes mobile deployment as simple as:
 
 ```python
 model.export("model.tflite", format="litert")
@@ -37,7 +38,7 @@ model.export("model.tflite", format="litert")
 - ✅ **Multi-backend support** - Train with JAX/PyTorch, export to LiteRT
 - ✅ **Automatic dict handling** - Keras-Hub models work out-of-the-box
 - ✅ **Dynamic shapes** - Resize inputs at runtime for flexibility
-- ✅ **Built-in optimization** - Quantization support
+- ✅ **Built-in optimization** - Quantization support via `litert_kwargs`
 
 ### What's Supported
 
@@ -71,14 +72,11 @@ model.export("mnist.tflite", format="litert")
 print("✓ Exported mnist.tflite")
 
 # Example 2: Keras-Hub Pretrained Model
+# Sequence length is configured at model construction via the preprocessor
 model = keras_hub.models.GemmaCausalLM.from_preset("gemma_2b_en")
 
-# Export with specific sequence length
-model.export(
-    "gemma.tflite",
-    format="litert",
-    max_sequence_length=128  # Keras-Hub specific parameter
-)
+# Export to LiteRT
+model.export("gemma.tflite", format="litert")
 print("✓ Exported gemma.tflite")
 ```
 
@@ -90,44 +88,36 @@ print("✓ Exported gemma.tflite")
 
 ### What Happens Behind the Scenes
 
-When you call `model.export("model.tflite", format="litert")`, the system performs these steps:
+When you call `model.export("model.tflite", format="litert")`, the Keras Core 
+export system performs these steps:
 
 **1. Input Signature Inference**
 ```python
-# For Keras-Hub models:
-config = get_exporter_config(model)  # Detects model type
-input_signature = config.get_input_signature(max_sequence_length)
-# Result: {"token_ids": (None, 128), "padding_mask": (None, 128)}
+# Keras Core automatically infers the input signature:
+from keras.src.export.export_utils import get_input_signature
+input_signature = get_input_signature(model)
+# Result: e.g., {"token_ids": TensorSpec(None, 128), ...}
 
-# For Keras Core models:
-input_signature = model.inputs  # Uses model.inputs directly
-# Result: [(None, 784)] for Sequential MNIST model
+# For standard Keras models:
+# Uses model.inputs or infers from build configuration
 ```
 
-**2. Dict-to-List Adaptation** (if needed)
+**2. Nested Input Handling** (automatic)
 ```python
-# If model uses dictionary inputs (common in Keras-Hub):
-if is_dict_input(model):
-    # Create adapter: list inputs → dict → original model
-    adapter = create_adapter(model, input_signature)
-    model_to_export = adapter  # Export adapter instead
-else:
-    model_to_export = model  # Export directly
+# If model uses nested inputs (dicts, lists):
+# Keras Core's LiteRTExporter creates an adapter model automatically
+# that converts flat list inputs → nested structure → original model
 ```
 
 **3. TFLite Conversion**
 ```python
-# Try direct conversion first (faster)
-try:
-    converter = tf.lite.TFLiteConverter.from_keras_model(model_to_export)
-    converter.target_spec.supported_ops = [
-        tf.lite.OpsSet.TFLITE_BUILTINS,
-        tf.lite.OpsSet.SELECT_TF_OPS  # Fallback for complex ops
-    ]
-    tflite_model = converter.convert()
-except Exception:
-    # Fallback to wrapper-based conversion (more compatible)
-    tflite_model = wrapper_based_conversion(model_to_export)
+# Keras handles conversion via keras.src.export.litert
+converter = tf.lite.TFLiteConverter.from_keras_model(model_to_export)
+converter.target_spec.supported_ops = [
+    tf.lite.OpsSet.TFLITE_BUILTINS,
+    tf.lite.OpsSet.SELECT_TF_OPS  # Fallback for complex ops
+]
+tflite_model = converter.convert()
 ```
 
 **4. File Output**
@@ -147,19 +137,19 @@ with open("model.tflite", "wb") as f:
          ▼
 ┌─────────────────┐
 │ 1. Signature    │ Auto-detect input shapes/types
-│    Inference    │
+│    Inference    │ (Keras Core: get_input_signature)
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ 2. Dict-to-List │ Create adapter if model uses dict inputs
-│    Adaptation   │ (Keras-Hub models)
+│ 2. Nested Input │ Create adapter if model uses dict/nested inputs
+│    Adaptation   │ (handled automatically by Keras Core)
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
 │ 3. TFLite       │ Convert to .tflite format
-│    Conversion   │ (direct or wrapper-based)
+│    Conversion   │
 └────────┬────────┘
          │
          ▼
@@ -452,19 +442,46 @@ model.export("multi_input.tflite", format="litert")
 
 ### 4.2 Keras-Hub Models
 
+Keras-Hub models use the standard Keras `model.export()` API. The sequence length 
+and image size are determined at model construction time (via the preprocessor), 
+not during export.
+
 #### Text Models (CausalLM)
 
 ```python
 import keras_hub
 
-# Load pretrained model
+# Load pretrained model with a specific sequence length
+# The sequence_length is set in the preprocessor
+preprocessor = keras_hub.models.GemmaCausalLMPreprocessor.from_preset(
+    "gemma_2b_en",
+    sequence_length=128  # Set desired sequence length here
+)
+model = keras_hub.models.GemmaCausalLM.from_preset(
+    "gemma_2b_en",
+    preprocessor=preprocessor
+)
+
+# Export to LiteRT (sequence length is already set)
+model.export("gemma.tflite", format="litert")
+```
+
+**Alternative: Export with custom litert_kwargs:**
+
+```python
+import keras_hub
+import tensorflow as tf
+
 model = keras_hub.models.GemmaCausalLM.from_preset("gemma_2b_en")
 
-# Export with fixed sequence length
-model.export("gemma.tflite", format="litert", max_sequence_length=128)
-
-# Or export with dynamic sequence length (resize at runtime)
-model.export("gemma_dynamic.tflite", format="litert")
+# Export with quantization options via litert_kwargs
+model.export(
+    "gemma_quantized.tflite",
+    format="litert",
+    litert_kwargs={
+        "optimizations": [tf.lite.Optimize.DEFAULT]
+    }
+)
 ```
 
 **Supported Text Models:**
@@ -479,17 +496,18 @@ model.export("gemma_dynamic.tflite", format="litert")
 ```python
 import keras_hub
 
-# Load vision model
+# Load vision model - image size is determined by the preset/preprocessor
 model = keras_hub.models.ImageClassifier.from_preset(
     "efficientnetv2_b0_imagenet"
 )
 
-# Image size is auto-detected from preprocessor
+# Export to LiteRT (image size is already set by the preset)
 model.export("efficientnet.tflite", format="litert")
-
-# Or specify custom image size
-model.export("efficientnet_512.tflite", format="litert", image_size=512)
 ```
+
+**Note:** Image size is determined at model construction time via the 
+preprocessor/preset. To use a different image size, configure the 
+ImageConverter during model creation.
 
 **Supported Vision Models:**
 - `ImageClassifier` - EfficientNet, ResNet, ViT, etc.
@@ -503,12 +521,13 @@ model.export("efficientnet_512.tflite", format="litert", image_size=512)
 import keras_hub
 
 # PaliGemma (vision + language)
+# Sequence length is set at model construction via preprocessor
 model = keras_hub.models.PaliGemmaCausalLM.from_preset("paligemma_3b_224")
-model.export("paligemma.tflite", format="litert", max_sequence_length=128)
+model.export("paligemma.tflite", format="litert")
 
 # Gemma3 with vision encoder
 model = keras_hub.models.Gemma3CausalLM.from_preset("gemma3_2b_en")
-model.export("gemma3.tflite", format="litert", max_sequence_length=256)
+model.export("gemma3.tflite", format="litert")
 ```
 
 #### Seq2Seq Models
@@ -516,9 +535,9 @@ model.export("gemma3.tflite", format="litert", max_sequence_length=256)
 ```python
 import keras_hub
 
-# T5 or BART models
+# T5 or BART models - sequence length determined by preset
 model = keras_hub.models.Seq2SeqLM.from_preset("t5_small")
-model.export("t5.tflite", format="litert", max_sequence_length=512)
+model.export("t5.tflite", format="litert")
 ```
 
 ---
@@ -532,23 +551,26 @@ Export models with flexible input dimensions that can be resized at runtime:
 ```python
 import keras_hub
 
-# Export without specifying max_sequence_length
+# Export model - shapes are determined by the model's build configuration
 model = keras_hub.models.GemmaCausalLM.from_preset("gemma_2b_en")
-model.export("gemma_dynamic.tflite", format="litert")
+model.export("gemma.tflite", format="litert")
 
 # In your mobile app (Python example):
-import tensorflow as tf
+# Use ai_edge_litert.interpreter (preferred) or tf.lite.Interpreter (fallback)
+try:
+    from ai_edge_litert.interpreter import Interpreter
+except ImportError:
+    from tensorflow.lite import Interpreter
 
-interpreter = tf.lite.Interpreter(model_path="gemma_dynamic.tflite")
+interpreter = Interpreter(model_path="gemma.tflite")
 input_details = interpreter.get_input_details()
 
-# Resize token_ids to length 256
+# Resize inputs if the model was exported with dynamic shapes
 interpreter.resize_tensor_input(input_details[0]['index'], [1, 256])
-# Resize padding_mask to length 256
 interpreter.resize_tensor_input(input_details[1]['index'], [1, 256])
 
 interpreter.allocate_tensors()
-# Now run inference with 256 tokens
+# Now run inference
 ```
 
 **When to Use Dynamic Shapes:**
@@ -568,18 +590,20 @@ Override automatic signature inference for complex models:
 
 ```python
 import keras
-from keras.src.export.export_utils import make_input_spec
+import tensorflow as tf
 
-# Define custom signature
+# Define custom signature using TensorSpec
 input_signature = {
-    "token_ids": keras.layers.InputSpec(dtype="int32", shape=(None, 512)),
-    "padding_mask": keras.layers.InputSpec(dtype="int32", shape=(None, 512)),
-    "attention_mask": keras.layers.InputSpec(dtype="float32", shape=(None, 512, 512))
+    "token_ids": tf.TensorSpec(dtype=tf.int32, shape=(None, 512)),
+    "padding_mask": tf.TensorSpec(dtype=tf.int32, shape=(None, 512)),
 }
 
-# Export with custom signature
-from keras.src.export.litert import export_litert
-export_litert(model, "custom.tflite", input_signature=input_signature)
+# Export with custom signature via litert_kwargs
+model.export(
+    "custom.tflite",
+    format="litert",
+    input_signature=input_signature
+)
 ```
 
 ### 5.3 Backend-Specific Export
@@ -643,19 +667,28 @@ model.export("model.tflite", format="litert")
 ```python
 import keras_hub
 
-# Load model
+# Load model - sequence length is configured via the preprocessor
+# Default sequence length comes from the preset
 model = keras_hub.models.GemmaCausalLM.from_preset("gemma_2b_en")
 
-# Export for mobile inference
-model.export(
-    "gemma_mobile.tflite",
-    format="litert",
-    max_sequence_length=128  # Shorter for mobile
-)
+# Or specify a custom sequence length at construction time:
+# preprocessor = keras_hub.models.GemmaCausalLMPreprocessor.from_preset(
+#     "gemma_2b_en", sequence_length=128
+# )
+# model = keras_hub.models.GemmaCausalLM.from_preset(
+#     "gemma_2b_en", preprocessor=preprocessor
+# )
 
-# Test inference
-import tensorflow as tf
-interpreter = tf.lite.Interpreter(model_path="gemma_mobile.tflite")
+# Export for mobile inference
+model.export("gemma_mobile.tflite", format="litert")
+
+# Test inference - use ai_edge_litert (preferred) or tf.lite (fallback)
+try:
+    from ai_edge_litert.interpreter import Interpreter
+except ImportError:
+    from tensorflow.lite import Interpreter
+
+interpreter = Interpreter(model_path="gemma_mobile.tflite")
 interpreter.allocate_tensors()
 
 # Get input details
@@ -663,10 +696,12 @@ input_details = interpreter.get_input_details()
 print("Inputs:", [(d['name'], d['shape']) for d in input_details])
 
 # Prepare inputs (list order, not dict!)
-token_ids = [[1, 2, 3, ...]]  # Shape: (1, 128)
-padding_mask = [[1, 1, 1, ...]]  # Shape: (1, 128)
+import numpy as np
+seq_len = input_details[0]['shape'][1]  # Get sequence length from model
+token_ids = np.array([[1, 2, 3] + [0] * (seq_len - 3)], dtype=np.int32)
+padding_mask = np.array([[1, 1, 1] + [0] * (seq_len - 3)], dtype=np.int32)
 
-# Set inputs (order matters: token_ids first, then padding_mask)
+# Set inputs (order matches signature - check input_details for names)
 interpreter.set_tensor(input_details[0]['index'], token_ids)
 interpreter.set_tensor(input_details[1]['index'], padding_mask)
 
@@ -680,15 +715,15 @@ logits = interpreter.get_tensor(output_details[0]['index'])
 
 **Important Notes:**
 - Exported .tflite uses **list inputs**, not dict
-- Input order: `[token_ids, padding_mask]`
-- Sequence length must match exported model or use dynamic shapes
+- Sequence length is determined at model construction time
+- Check `input_details` for the correct input order and shapes
 
 ### 6.2 Image Classification Models
 
 ```python
 import keras_hub
 
-# Load and export
+# Load and export - image size is determined by the preset
 model = keras_hub.models.ImageClassifier.from_preset(
     "efficientnetv2_b0_imagenet"
 )
@@ -699,7 +734,13 @@ import tensorflow as tf
 import numpy as np
 from PIL import Image
 
-interpreter = tf.lite.Interpreter(model_path="efficientnet.tflite")
+# Use ai_edge_litert (preferred) or tf.lite (fallback)
+try:
+    from ai_edge_litert.interpreter import Interpreter
+except ImportError:
+    from tensorflow.lite import Interpreter
+
+interpreter = Interpreter(model_path="efficientnet.tflite")
 interpreter.allocate_tensors()
 
 # Load and preprocess image
@@ -722,14 +763,11 @@ predictions = interpreter.get_tensor(output_details[0]['index'])
 ```python
 import keras_hub
 
-# Load detector
+# Load detector - image size is determined by the preset
 model = keras_hub.models.ObjectDetector.from_preset("retinanet_resnet50")
 
-# Export with dynamic image size support
+# Export to LiteRT
 model.export("detector.tflite", format="litert")
-
-# Or fixed size for better performance
-model.export("detector_640.tflite", format="litert", image_size=640)
 ```
 
 ### 6.4 Multimodal Models (Vision + Language)
@@ -738,13 +776,14 @@ model.export("detector_640.tflite", format="litert", image_size=640)
 import keras_hub
 
 # PaliGemma for vision-language tasks
+# Image size (224) and sequence length are determined by the preset
 model = keras_hub.models.PaliGemmaCausalLM.from_preset("paligemma_3b_224")
 
 # Export
-model.export("paligemma.tflite", format="litert", max_sequence_length=128)
+model.export("paligemma.tflite", format="litert")
 
 # Mobile inference requires both image and text inputs
-# Input order: [token_ids, padding_mask, images, response_mask]
+# Check input_details for the correct input order and shapes
 ```
 
 ---
@@ -765,11 +804,11 @@ import keras
 
 model = keras.Sequential([...])
 
-# Export with dynamic range quantization
+# Export with dynamic range quantization using litert_kwargs
 model.export(
     "model_quantized.tflite",
     format="litert",
-    export_kwargs={
+    litert_kwargs={
         "optimizations": [tf.lite.Optimize.DEFAULT]
     }
 )
@@ -815,9 +854,7 @@ def representative_dataset():
         sample = np.random.random((1, 224, 224, 3)).astype(np.float32)
         yield [sample]
 
-# Step 2: Export with full integer quantization
-from keras.src.export.litert import export_litert
-
+# Step 2: For advanced quantization, use TFLite converter directly
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
 
 # Enable optimizations
@@ -841,29 +878,29 @@ with open("model_int8.tflite", "wb") as f:
     f.write(tflite_model)
 ```
 
-**Advanced: Use Keras Export API with Custom Converter Config**
+**Alternative: Use Keras Export API with litert_kwargs**
+
+For simpler quantization, you can pass options via `litert_kwargs`:
 
 ```python
 import keras
-from keras.src.export.litert import export_litert
+import tensorflow as tf
 
 model = keras.Sequential([...])
 
 # Prepare calibration data
-calibration_data = load_validation_samples(num_samples=200)
-
 def representative_dataset():
-    for sample in calibration_data:
-        yield [sample]
+    for _ in range(100):
+        yield [np.random.random((1, 224, 224, 3)).astype(np.float32)]
 
-# Export with quantization
-export_litert(
-    model,
-    "model_int8.tflite",
-    quantization_mode="int8",
-    representative_dataset=representative_dataset,
-    input_type="int8",  # Optional: int8 inputs
-    output_type="int8"  # Optional: int8 outputs
+# Export with quantization via litert_kwargs
+model.export(
+    "model_quantized.tflite",
+    format="litert",
+    litert_kwargs={
+        "optimizations": [tf.lite.Optimize.DEFAULT],
+        "representative_dataset": representative_dataset
+    }
 )
 ```
 
@@ -906,11 +943,25 @@ export_litert(
 
 3. **Check Accuracy After Quantization**
    ```python
+   import tensorflow as tf
+   
    # Export quantized model
-   model.export("quantized.tflite", format="litert", quantization_mode="int8")
+   model.export(
+       "quantized.tflite", 
+       format="litert",
+       litert_kwargs={
+           "optimizations": [tf.lite.Optimize.DEFAULT],
+           "representative_dataset": representative_dataset
+       }
+   )
    
    # Evaluate on validation set
-   interpreter = tf.lite.Interpreter("quantized.tflite")
+   try:
+       from ai_edge_litert.interpreter import Interpreter
+   except ImportError:
+       from tensorflow.lite import Interpreter
+   
+   interpreter = Interpreter("quantized.tflite")
    interpreter.allocate_tensors()
    
    accuracy = evaluate_tflite_model(interpreter, validation_data)
@@ -934,9 +985,7 @@ import keras
 
 model = keras.Sequential([...])
 
-# Export with float16 quantization
-from keras.src.export.litert import export_litert
-
+# For float16 quantization, use TFLite converter directly
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
 converter.optimizations = [tf.lite.Optimize.DEFAULT]
 converter.target_spec.supported_types = [tf.float16]
@@ -991,12 +1040,16 @@ tflite_model = converter.convert()
 ```python
 # Benchmark script
 import time
-import tensorflow as tf
 import numpy as np
 
 def benchmark_model(model_path, test_data, num_runs=100):
     """Benchmark TFLite model."""
-    interpreter = tf.lite.Interpreter(model_path)
+    try:
+        from ai_edge_litert.interpreter import Interpreter
+    except ImportError:
+        from tensorflow.lite import Interpreter
+    
+    interpreter = Interpreter(model_path)
     interpreter.allocate_tensors()
     
     input_details = interpreter.get_input_details()
@@ -1047,12 +1100,14 @@ def representative_dataset():
         sample = np.random.random((1, 224, 224, 3)).astype(np.float32)
         yield [sample]
 
-# Export with full integer quantization
+# Export with full integer quantization using litert_kwargs
 model.export(
     "model_int8.tflite",
     format="litert",
-    optimizations=[tf.lite.Optimize.DEFAULT],
-    representative_dataset=representative_dataset
+    litert_kwargs={
+        "optimizations": [tf.lite.Optimize.DEFAULT],
+        "representative_dataset": representative_dataset
+    }
 )
 ```
 
@@ -1062,27 +1117,31 @@ model.export(
 - Enables hardware acceleration (Edge TPU, DSP)
 - Requires calibration dataset
 
-### 7.3 Float16 Quantization
+### 7.6 Float16 Quantization (Simple)
 
-Balance between size and accuracy:
+Balance between size and accuracy using litert_kwargs:
 
 ```python
 import tensorflow as tf
 
 model.export(
-    "model_float16.tflite",
+    "model_quantized.tflite",
     format="litert",
-    optimizations=[tf.lite.Optimize.DEFAULT],
-    supported_types=[tf.float16]
+    litert_kwargs={
+        "optimizations": [tf.lite.Optimize.DEFAULT],
+        "target_spec": {
+            "supported_types": [tf.float16]
+        }
+    }
 )
 ```
 
 **Benefits:**
-- 2x smaller than float32
+- Smaller than float32
 - Better accuracy than int8
 - GPU-friendly
 
-### 7.4 Quantization for Text Models
+### 7.7 Quantization for Text Models
 
 ```python
 import tensorflow as tf
@@ -1105,7 +1164,7 @@ def text_representative_dataset():
         # Tokenize (you'll need the preprocessor)
         preprocessor = model.preprocessor
         tokens = preprocessor.tokenizer(prompt)
-        token_ids = tokens['token_ids'][:128]  # Match max_sequence_length
+        token_ids = tokens['token_ids'][:128]  # Match sequence length
         padding_mask = tokens['padding_mask'][:128]
         
         # Pad to fixed length
@@ -1117,17 +1176,18 @@ def text_representative_dataset():
             np.array([padding_mask], dtype=np.int32)
         ]
 
-# Export with quantization
+# Export with quantization using litert_kwargs
 model.export(
     "gemma_quantized.tflite",
     format="litert",
-    max_sequence_length=128,
-    optimizations=[tf.lite.Optimize.DEFAULT],
-    representative_dataset=text_representative_dataset
+    litert_kwargs={
+        "optimizations": [tf.lite.Optimize.DEFAULT],
+        "representative_dataset": text_representative_dataset
+    }
 )
 ```
 
-### 7.5 Quantization Comparison
+### 7.8 Quantization Comparison
 
 | Method | Size Reduction | Speed Increase | Accuracy | Dataset Required |
 |--------|---------------|----------------|----------|------------------|
@@ -1189,24 +1249,30 @@ Large models (e.g., gemma_7b) may require significant RAM during conversion.
 model.export(
     "model.tflite",
     format="litert",
-    optimizations=[tf.lite.Optimize.DEFAULT]
+    litert_kwargs={
+        "optimizations": [tf.lite.Optimize.DEFAULT]
+    }
 )
 ```
 
 #### "Some ops are not supported by TFLite"
 
 **Solution:**
-Enable TensorFlow Lite's flexible ops:
+Enable TensorFlow Lite's flexible ops using litert_kwargs:
 ```python
-from keras.src.export.litert import export_litert
+import tensorflow as tf
 
-export_litert(
-    model,
+model.export(
     "model.tflite",
-    target_spec={'supported_ops': [
-        tf.lite.OpsSet.TFLITE_BUILTINS,
-        tf.lite.OpsSet.SELECT_TF_OPS
-    ]}
+    format="litert",
+    litert_kwargs={
+        "target_spec": {
+            "supported_ops": [
+                tf.lite.OpsSet.TFLITE_BUILTINS,
+                tf.lite.OpsSet.SELECT_TF_OPS
+            ]
+        }
+    }
 )
 ```
 
@@ -1215,11 +1281,16 @@ export_litert(
 Always verify the exported model before deploying:
 
 ```python
-import tensorflow as tf
 import numpy as np
 
+# Use ai_edge_litert (preferred) or tf.lite (fallback)
+try:
+    from ai_edge_litert.interpreter import Interpreter
+except ImportError:
+    from tensorflow.lite import Interpreter
+
 # 1. Load the TFLite model
-interpreter = tf.lite.Interpreter(model_path="model.tflite")
+interpreter = Interpreter(model_path="model.tflite")
 interpreter.allocate_tensors()
 
 # 2. Get input/output details
@@ -1336,7 +1407,12 @@ analyze_model_size("model.tflite")
 ```python
 def check_weights_saved(model_path):
     """Verify model contains weights (not just structure)."""
-    interpreter = tf.lite.Interpreter(model_path)
+    try:
+        from ai_edge_litert.interpreter import Interpreter
+    except ImportError:
+        from tensorflow.lite import Interpreter
+    
+    interpreter = Interpreter(model_path)
     
     # Count non-zero weights
     total_weights = 0
@@ -1419,7 +1495,12 @@ import numpy as np
 
 def benchmark_inference(model_path, input_shape, num_runs=100):
     """Benchmark TFLite model inference speed."""
-    interpreter = tf.lite.Interpreter(model_path)
+    try:
+        from ai_edge_litert.interpreter import Interpreter
+    except ImportError:
+        from tensorflow.lite import Interpreter
+    
+    interpreter = Interpreter(model_path)
     interpreter.allocate_tensors()
     
     input_details = interpreter.get_input_details()
@@ -1480,9 +1561,13 @@ model.export("model.tflite", format="litert", verbose=True)
 #### Inspect .tflite File
 
 ```python
-import tensorflow as tf
+# Use ai_edge_litert (preferred) or tf.lite (fallback)
+try:
+    from ai_edge_litert.interpreter import Interpreter
+except ImportError:
+    from tensorflow.lite import Interpreter
 
-interpreter = tf.lite.Interpreter(model_path="model.tflite")
+interpreter = Interpreter(model_path="model.tflite")
 interpreter.allocate_tensors()
 
 # Check inputs
@@ -1503,11 +1588,16 @@ for detail in output_details:
 #### Test Inference Before Deployment
 
 ```python
-import tensorflow as tf
 import numpy as np
 
+# Use ai_edge_litert (preferred) or tf.lite (fallback)
+try:
+    from ai_edge_litert.interpreter import Interpreter
+except ImportError:
+    from tensorflow.lite import Interpreter
+
 # Load model
-interpreter = tf.lite.Interpreter(model_path="model.tflite")
+interpreter = Interpreter(model_path="model.tflite")
 interpreter.allocate_tensors()
 
 # Create dummy input
@@ -1580,7 +1670,7 @@ print(f"Size: {os.path.getsize('model.tflite') / 1024 / 1024:.2f} MB")
 
 # With quantization (~75% smaller)
 model.export("model_quant.tflite", format="litert",
-             optimizations=[tf.lite.Optimize.DEFAULT])
+             litert_kwargs={"optimizations": [tf.lite.Optimize.DEFAULT]})
 print(f"Size: {os.path.getsize('model_quant.tflite') / 1024 / 1024:.2f} MB")
 ```
 
@@ -1660,7 +1750,12 @@ val interpreter = Interpreter(modelFile)
 3. **Shape mismatch**
    ```python
    # Verify exported shapes
-   interpreter = tf.lite.Interpreter("model.tflite")
+   try:
+       from ai_edge_litert.interpreter import Interpreter
+   except ImportError:
+       from tensorflow.lite import Interpreter
+   
+   interpreter = Interpreter("model.tflite")
    print(interpreter.get_input_details()[0]['shape'])
    ```
 
@@ -1691,8 +1786,10 @@ model.export("model.tflite", format="litert")
 
 **Option 1: Export with dynamic batch**
 ```python
+import tensorflow as tf
+
 model.export("model.tflite", format="litert",
-             input_signature=[InputSpec(shape=(None, 224, 224, 3))])
+             input_signature=[tf.TensorSpec(shape=(None, 224, 224, 3), dtype=tf.float32)])
 # First dimension is batch size (dynamic)
 ```
 
@@ -1700,7 +1797,7 @@ model.export("model.tflite", format="litert",
 ```python
 # Batch size = 8
 model.export("model_batch8.tflite", format="litert",
-             input_signature=[InputSpec(shape=(8, 224, 224, 3))])
+             input_signature=[tf.TensorSpec(shape=(8, 224, 224, 3), dtype=tf.float32)])
 ```
 
 **Mobile inference:**
@@ -1796,7 +1893,7 @@ class MultiModelInference(context: Context) {
    ```python
    # Quantize to reduce computation
    model.export("model.tflite", format="litert",
-                optimizations=[tf.lite.Optimize.DEFAULT])
+                litert_kwargs={"optimizations": [tf.lite.Optimize.DEFAULT]})
    ```
 
 3. **Wrong thread count**
@@ -1846,7 +1943,12 @@ import tensorflow as tf
 profiler = tf.lite.experimental.Profiler("model.tflite")
 
 # Run with profiling
-interpreter = tf.lite.Interpreter("model.tflite")
+try:
+    from ai_edge_litert.interpreter import Interpreter
+except ImportError:
+    from tensorflow.lite import Interpreter
+
+interpreter = Interpreter("model.tflite")
 interpreter.allocate_tensors()
 
 # Enable profiling
@@ -1893,18 +1995,31 @@ Mobile inference always runs with `training=False`.
 
 ### Q: How do I handle variable-length inputs (text)?
 
-**Option 1: Export with maximum length**
+**Option 1: Set sequence length at model construction (recommended)**
 ```python
-model.export("model.tflite", format="litert",
-             max_sequence_length=512)
+# Configure sequence length when creating the model
+preprocessor = keras_hub.models.GemmaCausalLMPreprocessor.from_preset(
+    "gemma_2b_en",
+    sequence_length=512  # Set desired length here
+)
+model = keras_hub.models.GemmaCausalLM.from_preset(
+    "gemma_2b_en",
+    preprocessor=preprocessor
+)
+model.export("model.tflite", format="litert")
 
 # Pad shorter inputs to 512 on mobile
 ```
 
-**Option 2: Export with dynamic length**
+**Option 2: Export with custom input_signature**
 ```python
-model.export("model.tflite", format="litert",
-             input_signature={"token_ids": InputSpec(shape=(None, None))})
+import tensorflow as tf
+
+model.export(
+    "model.tflite",
+    format="litert",
+    input_signature=[tf.TensorSpec(shape=(None, None), dtype=tf.int32)]
+)
 
 # Mobile can use any length (slower)
 ```
@@ -1941,731 +2056,236 @@ model.export("bert.tflite", format="litert")
 
 ---
 
-## 11. Developer Guide: Adding Support for New Model Types
+## 11. Developer Guide: Custom Models and Advanced Usage
 
-This section is for developers who want to add LiteRT export support for new Keras-Hub model types or custom tasks.
+This section is for developers who want to export custom Keras models or understand
+the export process in detail.
 
 ### 11.1 Overview
 
-To enable LiteRT export for a new model type, you need to:
-
-1. **Implement `get_input_signature()`** - Define the expected input structure
-2. **Handle export kwargs carefully** - Only pass valid TFLite converter arguments
-3. **Test thoroughly** - Ensure export works across different configurations
-4. **Document input requirements** - Help users understand expected inputs
-
-### 11.2 The Core Contract
-
-#### What LiteRT Export Expects
-
-```python
-class YourCustomTask(keras.Model):
-    """Your custom Keras-Hub task."""
-    
-    def get_input_signature(self, max_sequence_length=None, **kwargs):
-        """
-        Returns the input signature for TFLite export.
-        
-        Args:
-            max_sequence_length: Maximum sequence length (for text models).
-                Can be None for dynamic shapes.
-            **kwargs: Additional task-specific parameters.
-        
-        Returns:
-            dict or list of tf.TensorSpec: Input signature describing
-            the expected input structure.
-        
-        Examples:
-            # Text model with fixed length
-            {"token_ids": tf.TensorSpec(shape=(None, 128), dtype=tf.int32),
-             "padding_mask": tf.TensorSpec(shape=(None, 128), dtype=tf.int32)}
-            
-            # Vision model
-            [tf.TensorSpec(shape=(None, 224, 224, 3), dtype=tf.float32)]
-            
-            # Multimodal model
-            {"images": tf.TensorSpec(shape=(None, 224, 224, 3), dtype=tf.float32),
-             "token_ids": tf.TensorSpec(shape=(None, 128), dtype=tf.int32)}
-        """
-        raise NotImplementedError("Subclasses must implement get_input_signature()")
-```
+Keras-Hub models use the standard Keras `model.export()` API directly. The export 
+functionality is implemented in Keras Core (`keras.src.export.litert`), and 
+Keras-Hub models inherit this capability without any custom export handling.
 
 **Key Points:**
+- Export is handled by Keras Core, not by Keras-Hub
+- Use `model.export(path, format="litert", litert_kwargs={...})`
+- Input signatures are automatically inferred from the model
+- Custom kwargs are passed via `litert_kwargs` dict
 
-- **Return type**: Dict or list of `tf.TensorSpec` objects
-- **Batch dimension**: First dimension should be `None` for variable batch size
-- **Dynamic shapes**: Use `None` for dimensions that can vary (e.g., sequence length)
-- **Fixed shapes**: Use integers for dimensions that must be fixed (e.g., image size)
+### 11.2 The Export API
 
-### 11.3 Step-by-Step Implementation
-
-#### Example 1: Simple Text Classification Task
-
-```python
-import keras
-import tensorflow as tf
-from keras_hub.src.models.task import Task
-
-class CustomTextClassifier(Task):
-    """Custom text classification task."""
-    
-    def __init__(self, backbone, num_classes=2, **kwargs):
-        super().__init__(**kwargs)
-        self.backbone = backbone
-        self.classifier = keras.layers.Dense(num_classes, activation="softmax")
-    
-    def call(self, inputs, training=False):
-        """Forward pass accepting dictionary inputs."""
-        # inputs is a dict: {"token_ids": ..., "padding_mask": ...}
-        embeddings = self.backbone(inputs, training=training)
-        pooled = tf.reduce_mean(embeddings, axis=1)
-        return self.classifier(pooled)
-    
-    def get_input_signature(self, max_sequence_length=None):
-        """
-        Define input signature for LiteRT export.
-        
-        This tells the exporter what inputs the model expects.
-        """
-        if max_sequence_length is None:
-            max_sequence_length = 512  # Default
-        
-        # Return dictionary matching the call() signature
-        return {
-            "token_ids": tf.TensorSpec(
-                shape=(None, max_sequence_length),
-                dtype=tf.int32,
-                name="token_ids"
-            ),
-            "padding_mask": tf.TensorSpec(
-                shape=(None, max_sequence_length),
-                dtype=tf.int32,
-                name="padding_mask"
-            ),
-        }
-    
-    def export(self, filepath, format="litert", max_sequence_length=128, **kwargs):
-        """
-        Override export to add task-specific parameters.
-        
-        Args:
-            filepath: Output path for .tflite file
-            format: Export format (should be "litert")
-            max_sequence_length: Maximum sequence length for export
-            **kwargs: Additional arguments passed to TFLite converter
-        """
-        # Get input signature for this configuration
-        input_signature = self.get_input_signature(
-            max_sequence_length=max_sequence_length
-        )
-        
-        # IMPORTANT: Only pass kwargs that are valid TFLite converter arguments
-        # DO NOT forward export-level parameters like "verbose"
-        # The export_litert function will validate kwargs against converter attributes
-        
-        from keras.src.export.litert import export_litert
-        return export_litert(
-            self,
-            filepath,
-            input_signature=input_signature,
-            **kwargs  # Only converter kwargs (e.g., optimizations, target_spec)
-        )
-```
-
-**Usage:**
-
-```python
-# Create and use the custom task
-model = CustomTextClassifier(backbone=my_backbone, num_classes=10)
-
-# Export with specific sequence length
-model.export("classifier.tflite", format="litert", max_sequence_length=256)
-
-# Export with quantization (valid converter kwarg)
-model.export(
-    "classifier_quant.tflite",
-    format="litert",
-    max_sequence_length=128,
-    optimizations=[tf.lite.Optimize.DEFAULT]  # Valid TFLite converter arg
-)
-```
-
-#### Example 2: Multimodal Model (Vision + Text)
+#### Basic Export
 
 ```python
 import keras
-import tensorflow as tf
-from keras_hub.src.models.task import Task
 
-class MultimodalClassifier(Task):
-    """Multimodal task accepting images and text."""
-    
-    def __init__(self, vision_backbone, text_backbone, num_classes=1000, **kwargs):
-        super().__init__(**kwargs)
-        self.vision_backbone = vision_backbone
-        self.text_backbone = text_backbone
-        self.fusion = keras.layers.Dense(512, activation="relu")
-        self.classifier = keras.layers.Dense(num_classes, activation="softmax")
-    
-    def call(self, inputs, training=False):
-        """
-        Forward pass with multimodal inputs.
-        
-        Args:
-            inputs: Dictionary with keys:
-                - "images": (batch, height, width, channels)
-                - "token_ids": (batch, seq_len)
-                - "padding_mask": (batch, seq_len)
-        """
-        # Extract inputs
-        images = inputs["images"]
-        text_inputs = {
-            "token_ids": inputs["token_ids"],
-            "padding_mask": inputs["padding_mask"]
-        }
-        
-        # Process each modality
-        vision_features = self.vision_backbone(images, training=training)
-        text_features = self.text_backbone(text_inputs, training=training)
-        
-        # Fuse and classify
-        combined = tf.concat([
-            tf.reduce_mean(vision_features, axis=[1, 2]),  # Global pool vision
-            tf.reduce_mean(text_features, axis=1)  # Pool text
-        ], axis=-1)
-        
-        fused = self.fusion(combined)
-        return self.classifier(fused)
-    
-    def get_input_signature(
-        self,
-        max_sequence_length=None,
-        image_size=(224, 224),
-        **kwargs
-    ):
-        """
-        Define multimodal input signature.
-        
-        Args:
-            max_sequence_length: Text sequence length (default: 128)
-            image_size: Image dimensions as (height, width)
-        """
-        if max_sequence_length is None:
-            max_sequence_length = 128
-        
-        height, width = image_size
-        
-        return {
-            "images": tf.TensorSpec(
-                shape=(None, height, width, 3),
-                dtype=tf.float32,
-                name="images"
-            ),
-            "token_ids": tf.TensorSpec(
-                shape=(None, max_sequence_length),
-                dtype=tf.int32,
-                name="token_ids"
-            ),
-            "padding_mask": tf.TensorSpec(
-                shape=(None, max_sequence_length),
-                dtype=tf.int32,
-                name="padding_mask"
-            ),
-        }
-    
-    def export(
-        self,
-        filepath,
-        format="litert",
-        max_sequence_length=128,
-        image_size=(224, 224),
-        **kwargs
-    ):
-        """Export with multimodal-specific parameters."""
-        input_signature = self.get_input_signature(
-            max_sequence_length=max_sequence_length,
-            image_size=image_size
-        )
-        
-        from keras.src.export.litert import export_litert
-        return export_litert(self, filepath, input_signature=input_signature, **kwargs)
-```
+# Any Keras model (Sequential, Functional, or Subclassed)
+model = keras.Sequential([...])
 
-**Usage:**
+# Basic export
+model.export("model.tflite", format="litert")
 
-```python
-# Create multimodal model
-model = MultimodalClassifier(
-    vision_backbone=resnet_backbone,
-    text_backbone=bert_backbone,
-    num_classes=1000
-)
-
-# Export with custom image and text sizes
+# Export with additional options
 model.export(
-    "multimodal.tflite",
+    "model.tflite",
     format="litert",
-    max_sequence_length=256,
-    image_size=(384, 384)
+    input_signature=custom_signature,  # Optional: override auto-inference
+    litert_kwargs={
+        "optimizations": [tf.lite.Optimize.DEFAULT],
+        "representative_dataset": my_dataset
+    }
 )
 ```
 
-### 11.4 Common Pitfalls and Solutions
+#### What Keras Export Handles
 
-#### Pitfall 1: Forwarding Export-Level Parameters to Converter
+The Keras LiteRT exporter (`keras.src.export.litert.LiteRTExporter`) automatically:
+1. **Infers input signature** from the model's build configuration
+2. **Handles nested inputs** (dicts, lists) by creating adapter models
+3. **Converts to TFLite format** using TensorFlow's converter
 
-❌ **BAD:**
+### 11.3 Custom Subclassed Models
+
+For subclassed models (inheriting from `keras.Model`), you must ensure the model
+is built before export:
+
 ```python
-def export(self, filepath, format="litert", verbose=True, **kwargs):
-    # DON'T: Forwarding 'verbose' into export kwargs
-    export_kwargs = kwargs.copy()
-    export_kwargs["verbose"] = verbose  # ❌ This will fail!
-    
-    return export_litert(self, filepath, **export_kwargs)
-```
-
-**Error:**
-```
-ValueError: Unknown converter attribute 'verbose'. Valid converter attributes: 
-['optimizations', 'representative_dataset', 'target_spec', ...]
-```
-
-✅ **GOOD:**
-```python
-def export(self, filepath, format="litert", verbose=True, **kwargs):
-    # 'verbose' is used at export API level for logging
-    if verbose:
-        print(f"Exporting to {filepath}...")
-    
-    # Only pass converter-valid kwargs (optimizations, target_spec, etc.)
-    return export_litert(self, filepath, input_signature=..., **kwargs)
-```
-
-**Why:** The `export_litert` function validates all kwargs against `tf.lite.TFLiteConverter` attributes at runtime. Export-level parameters like `verbose` are not valid converter attributes and will raise a `ValueError`.
-
-#### Pitfall 2: Not Calling Subclassed Models Before Export
-
-❌ **BAD:**
-```python
-class CustomModel(keras.Model):
-    def __init__(self):
-        super().__init__()
-        self.dense = keras.layers.Dense(10)
-    
-    def call(self, inputs):
-        return self.dense(inputs)
-
-# Export immediately without building
-model = CustomModel()
-model.export("model.tflite", format="litert")  # ❌ May fail!
-```
-
-**Error:**
-```
-ValueError: Model inputs are not defined. Please call the model with sample data first.
-```
-
-✅ **GOOD:**
-```python
+import keras
 import numpy as np
 
-model = CustomModel()
+class CustomTextClassifier(keras.Model):
+    """Custom text classification model."""
+    
+    def __init__(self, num_classes=2, **kwargs):
+        super().__init__(**kwargs)
+        self.embedding = keras.layers.Embedding(10000, 128)
+        self.pooling = keras.layers.GlobalAveragePooling1D()
+        self.classifier = keras.layers.Dense(num_classes, activation="softmax")
+    
+    def call(self, inputs, training=False):
+        """Forward pass."""
+        x = self.embedding(inputs)
+        x = self.pooling(x)
+        return self.classifier(x)
 
-# Call model with sample data to establish input shapes
-sample_input = np.zeros((1, 784), dtype=np.float32)
-_ = model(sample_input, training=False)  # Build the model
+# Create model
+model = CustomTextClassifier(num_classes=10)
+
+# CRITICAL: Call model with sample data to build it
+sample_input = np.zeros((1, 128), dtype=np.int32)
+_ = model(sample_input)
 
 # Now export
+model.export("classifier.tflite", format="litert")
+```
+
+### 11.4 Custom Input Signatures
+
+If automatic signature inference fails, provide an explicit input signature:
+
+```python
+import keras
+import tensorflow as tf
+
+model = CustomTextClassifier(num_classes=10)
+
+# Define explicit input signature
+input_signature = [
+    tf.TensorSpec(shape=(None, 128), dtype=tf.int32, name="input")
+]
+
+# Export with custom signature
+model.export(
+    "classifier.tflite",
+    format="litert",
+    input_signature=input_signature
+)
+```
+
+### 11.5 Common Pitfalls and Solutions
+
+#### Pitfall 1: Not Building Subclassed Models
+
+❌ **BAD:**
+```python
+model = CustomModel()
+model.export("model.tflite", format="litert")  # ❌ May fail - model not built!
+```
+
+✅ **GOOD:**
+```python
+model = CustomModel()
+_ = model(sample_input)  # Build the model first
 model.export("model.tflite", format="litert")
 ```
 
-**Why:** Subclassed models (those inheriting from `keras.Model`) don't have defined input shapes until they're called with data. Calling the model once establishes the shapes needed for export.
-
-#### Pitfall 3: Hardcoding Converter Attributes (Anti-Pattern)
-
-❌ **BAD (Fragile):**
-```python
-def _apply_converter_kwargs(self, converter):
-    """Apply kwargs to converter."""
-    # Hardcoded list of known attributes
-    KNOWN_ATTRS = ["optimizations", "representative_dataset", "target_spec"]
-    
-    for key, value in self.kwargs.items():
-        if key in KNOWN_ATTRS:  # ❌ Will break when TF adds new attributes
-            setattr(converter, key, value)
-```
-
-✅ **GOOD (Future-Proof):**
-```python
-def _apply_converter_kwargs(self, converter):
-    """Apply kwargs to converter with runtime validation."""
-    for attr, value in self.kwargs.items():
-        if attr == "target_spec" and isinstance(value, dict):
-            # Handle nested target_spec dict
-            for spec_key, spec_value in value.items():
-                if hasattr(converter.target_spec, spec_key):
-                    setattr(converter.target_spec, spec_key, spec_value)
-                else:
-                    # List valid target_spec attributes
-                    valid = [a for a in dir(converter.target_spec) if not a.startswith("_")]
-                    raise ValueError(
-                        f"Unknown target_spec attribute '{spec_key}'. "
-                        f"Valid attributes: {valid}"
-                    )
-        elif hasattr(converter, attr):
-            setattr(converter, attr, value)
-        else:
-            # List valid converter attributes
-            valid = [a for a in dir(converter) if not a.startswith("_")]
-            raise ValueError(
-                f"Unknown converter attribute '{attr}'. "
-                f"Valid attributes: {valid}"
-            )
-```
-
-**Why:** Runtime validation using `hasattr()` automatically adapts to new TensorFlow versions. If TensorFlow adds a new converter attribute, it will work immediately without code changes. Invalid attributes raise helpful errors listing all valid options.
-
-#### Pitfall 4: Using Python Control Flow in Model
+#### Pitfall 2: Using Python Control Flow
 
 ❌ **BAD:**
 ```python
 class BadModel(keras.Model):
     def call(self, inputs):
-        # Python if/else won't be traced during export
-        if inputs.shape[1] > 100:  # ❌ Python condition
+        if inputs.shape[1] > 100:  # ❌ Python condition won't trace
             return self.large_path(inputs)
-        else:
-            return self.small_path(inputs)
+        return self.small_path(inputs)
 ```
-
-**Problem:** Python control flow runs at graph-building time, not inference time. The exported model will only contain one path.
 
 ✅ **GOOD:**
 ```python
+import tensorflow as tf
+
 class GoodModel(keras.Model):
     def call(self, inputs):
-        # Use TensorFlow ops for conditional logic
-        seq_len = tf.shape(inputs)[1]
-        
-        # Both paths are traced into the graph
-        large_output = self.large_path(inputs)
-        small_output = self.small_path(inputs)
-        
-        # TF conditional selects at runtime
+        # Use TF ops for conditional logic
+        condition = tf.shape(inputs)[1] > 100
         return tf.cond(
-            seq_len > 100,
-            lambda: large_output,
-            lambda: small_output
+            condition,
+            lambda: self.large_path(inputs),
+            lambda: self.small_path(inputs)
         )
 ```
 
-#### Pitfall 5: Mismatched Input Signature and call() Signature
+#### Pitfall 3: Not Handling litert_kwargs Properly
 
 ❌ **BAD:**
 ```python
-class MismatchedModel(Task):
-    def call(self, inputs):
-        # Expects dict: {"token_ids": ..., "padding_mask": ...}
-        token_ids = inputs["token_ids"]
-        padding_mask = inputs["padding_mask"]
-        # ...
-    
-    def get_input_signature(self, max_sequence_length=128):
-        # ❌ Returns list instead of dict!
-        return [
-            tf.TensorSpec(shape=(None, max_sequence_length), dtype=tf.int32)
-        ]
+# Passing optimizations directly (wrong)
+model.export("model.tflite", format="litert", optimizations=[...])
 ```
-
-**Error:** Runtime mismatch when model tries to access dict keys on list input.
 
 ✅ **GOOD:**
 ```python
-class MatchedModel(Task):
-    def call(self, inputs):
-        # Expects dict
-        token_ids = inputs["token_ids"]
-        padding_mask = inputs["padding_mask"]
-        # ...
-    
-    def get_input_signature(self, max_sequence_length=128):
-        # ✅ Returns dict matching call() signature
-        return {
-            "token_ids": tf.TensorSpec(shape=(None, max_sequence_length), dtype=tf.int32),
-            "padding_mask": tf.TensorSpec(shape=(None, max_sequence_length), dtype=tf.int32),
-        }
+# Use litert_kwargs dict
+model.export(
+    "model.tflite",
+    format="litert",
+    litert_kwargs={"optimizations": [...]}
+)
 ```
 
-### 11.5 Testing Your Implementation
-
-#### Unit Test Template
+### 11.6 Testing Export
 
 ```python
 import pytest
-import tensorflow as tf
-import keras
-from keras_hub.src.models.your_task import YourCustomTask
+import tempfile
+import os
 
-class TestYourCustomTaskExport:
-    """Test LiteRT export for YourCustomTask."""
-    
-    def test_basic_export(self, tmp_path):
-        """Test basic export with default parameters."""
-        model = YourCustomTask.from_preset("your_preset_name")
+def test_litert_export(model, input_data):
+    """Test LiteRT export for a model."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        filepath = os.path.join(temp_dir, "model.tflite")
         
-        filepath = tmp_path / "model.tflite"
+        # Export
         model.export(filepath, format="litert")
         
-        # Verify file exists and has content
-        assert filepath.exists()
-        assert filepath.stat().st_size > 0
-    
-    def test_export_with_custom_sequence_length(self, tmp_path):
-        """Test export with custom sequence length."""
-        model = YourCustomTask.from_preset("your_preset_name")
+        # Verify file exists
+        assert os.path.exists(filepath)
+        assert os.path.getsize(filepath) > 0
         
-        filepath = tmp_path / "model_256.tflite"
-        model.export(filepath, format="litert", max_sequence_length=256)
+        # Load and test inference
+        try:
+            from ai_edge_litert.interpreter import Interpreter
+        except ImportError:
+            from tensorflow.lite import Interpreter
         
-        assert filepath.exists()
-    
-    def test_export_with_quantization(self, tmp_path):
-        """Test export with quantization."""
-        model = YourCustomTask.from_preset("your_preset_name")
-        
-        filepath = tmp_path / "model_quant.tflite"
-        model.export(
-            filepath,
-            format="litert",
-            optimizations=[tf.lite.Optimize.DEFAULT]
-        )
-        
-        assert filepath.exists()
-        
-        # Quantized model should be smaller
-        normal_path = tmp_path / "model_normal.tflite"
-        model.export(normal_path, format="litert")
-        
-        assert filepath.stat().st_size < normal_path.stat().st_size
-    
-    def test_exported_model_inference(self, tmp_path):
-        """Test that exported model produces valid outputs."""
-        model = YourCustomTask.from_preset("your_preset_name")
-        
-        filepath = tmp_path / "model.tflite"
-        model.export(filepath, format="litert", max_sequence_length=128)
-        
-        # Load and run TFLite model
-        interpreter = tf.lite.Interpreter(model_path=str(filepath))
+        interpreter = Interpreter(model_path=filepath)
         interpreter.allocate_tensors()
         
-        # Get input/output details
+        # Run inference
         input_details = interpreter.get_input_details()
         output_details = interpreter.get_output_details()
         
-        # Create sample input
-        sample_input = tf.constant([[1, 2, 3, 4] + [0] * 124], dtype=tf.int32)
-        
-        # Run inference
-        interpreter.set_tensor(input_details[0]['index'], sample_input)
+        # Set inputs and invoke
+        for i, (name, data) in enumerate(input_data.items()):
+            interpreter.set_tensor(input_details[i]['index'], data)
         interpreter.invoke()
+        
+        # Verify output
         output = interpreter.get_tensor(output_details[0]['index'])
-        
-        # Verify output shape
-        assert output.shape[0] == 1  # Batch size
-        assert len(output.shape) >= 1
-    
-    def test_invalid_kwarg_raises_error(self, tmp_path):
-        """Test that invalid kwargs raise clear errors."""
-        model = YourCustomTask.from_preset("your_preset_name")
-        
-        filepath = tmp_path / "model.tflite"
-        
-        # Invalid converter kwarg should raise ValueError
-        with pytest.raises(ValueError, match="Unknown converter attribute"):
-            model.export(
-                filepath,
-                format="litert",
-                invalid_param="some_value"  # Not a valid converter arg
-            )
+        assert output is not None
 ```
 
-#### Running Tests Locally
+### 11.7 Common Issues and Solutions
 
-```bash
-# Test your specific task
-cd keras-hub
-python -m pytest keras_hub/src/models/your_task/your_task_test.py -v
-
-# Test all LiteRT exports
-python -m pytest keras_hub/src/export/litert_config_test.py -v
-
-# Test with coverage
-python -m pytest keras_hub/src/models/your_task/ --cov=keras_hub.src.export -v
-```
-
-### 11.6 Documentation Checklist
-
-When adding a new model type, document:
-
-- [ ] **Input signature requirements** in model docstring
-- [ ] **get_input_signature() parameters** with examples
-- [ ] **Export parameters** (max_sequence_length, image_size, etc.)
-- [ ] **Example usage** with code snippet
-- [ ] **Performance characteristics** (export time, file size)
-- [ ] **Mobile deployment notes** (if any special considerations)
-
-**Example Documentation:**
-
-```python
-class YourCustomTask(Task):
-    """
-    Your custom task description.
-    
-    LiteRT Export:
-        This task supports LiteRT export with configurable sequence length:
-        
-        ```python
-        model = YourCustomTask.from_preset("preset_name")
-        model.export("model.tflite", format="litert", max_sequence_length=128)
-        ```
-        
-        Export Parameters:
-            max_sequence_length: Maximum input sequence length (default: 512).
-                Shorter sequences are padded, longer sequences are truncated.
-            optimizations: List of tf.lite.Optimize options (optional).
-            
-        Mobile Inference:
-            Input format: {"token_ids": int32[batch, seq_len],
-                          "padding_mask": int32[batch, seq_len]}
-            Output format: float32[batch, num_classes]
-            
-        Performance (on M2 Mac):
-            - Export time: ~15 seconds
-            - File size: ~400 MB
-            - Inference latency: ~50ms per batch on iPhone 15
-    """
-```
-
-### 11.7 When You Need Custom Adapters
-
-The LiteRT exporter automatically creates adapters for dictionary inputs. You only need a custom adapter if:
-
-1. **Non-standard input preprocessing** is required
-2. **Multiple models** need to be combined
-3. **Custom output formatting** is needed
-
-**Example: Custom Preprocessing Adapter**
-
-```python
-class PreprocessingAdapter(keras.Model):
-    """Adapter that includes preprocessing for mobile deployment."""
-    
-    def __init__(self, base_model, tokenizer, **kwargs):
-        super().__init__(**kwargs)
-        self.tokenizer = tokenizer
-        self.base_model = base_model
-    
-    def call(self, inputs):
-        """
-        Accept raw text strings and tokenize them.
-        
-        Args:
-            inputs: String tensor of shape (batch,)
-        
-        Returns:
-            Model predictions
-        """
-        # Tokenize strings (uses TF ops, not Python)
-        tokenized = self.tokenizer(inputs)
-        
-        # Run base model
-        return self.base_model(tokenized)
-    
-    def get_input_signature(self, **kwargs):
-        """Adapter accepts raw strings."""
-        return [tf.TensorSpec(shape=(None,), dtype=tf.string, name="text")]
-
-# Usage
-base_model = YourCustomTask.from_preset("preset")
-adapter = PreprocessingAdapter(base_model, tokenizer)
-
-# Export adapter instead of base model
-adapter.export("model_with_preprocessing.tflite", format="litert")
-```
-
-### 11.8 Debugging Export Issues
-
-#### Enable Verbose Logging
-
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-
-# Export will show detailed conversion logs
-model.export("model.tflite", format="litert")
-```
-
-#### Check TensorFlow Version
-
-```python
-import tensorflow as tf
-print(f"TensorFlow version: {tf.__version__}")
-
-# LiteRT export requires TF >= 2.16.0
-assert tf.__version__ >= "2.16.0"
-```
-
-#### Inspect Converter Behavior
-
-```python
-# Manual conversion to see detailed error messages
-import tensorflow as tf
-from keras.src.export.litert import LiteRTExporter
-
-exporter = LiteRTExporter(model, input_signature=input_signature)
-try:
-    tflite_model = exporter._convert_to_tflite(input_signature)
-    print("✓ Direct conversion succeeded")
-except Exception as e:
-    print(f"Direct conversion failed: {e}")
-    print("Falling back to wrapper-based conversion...")
-    tflite_model = exporter._convert_with_wrapper(input_signature)
-```
-
-#### Common Error Messages
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `ValueError: Unknown converter attribute 'X'` | Invalid kwarg passed to export | Only pass valid TFLite converter attributes. Check error message for valid list. |
-| `ValueError: Model inputs are not defined` | Subclassed model not built | Call model with sample data before export |
-| `TypeError: unhashable type: 'dict'` | Input signature mismatch | Ensure get_input_signature() returns structure matching call() |
-| `RuntimeError: ... TFLITE_BUILTINS_INT8 ...` | Quantization configuration error | Provide representative_dataset for int8 quantization |
-
-### 11.9 Contributing Your Model Type
-
-Once your model type is ready:
-
-1. **Run all tests**: `pytest keras_hub/src/models/your_task/`
-2. **Run pre-commit hooks**: `pre-commit run --all-files`
-3. **Update documentation**: Add example to User Guide
-4. **Create PR** with:
-   - Model implementation
-   - Unit tests (including LiteRT export tests)
-   - Documentation updates
-   - Example usage in `examples/`
+| Issue | Symptom | Solution |
+|-------|---------|----------|
+| **Model not built** | `Model inputs are not defined` | Call model with sample data before export |
+| **Wrong backend** | `Backend must be TensorFlow` | Set `KERAS_BACKEND=tensorflow` before importing |
+| **Invalid kwargs** | `Unknown converter attribute` | Use `litert_kwargs` dict for converter options |
+| **Python control flow** | Incorrect graph | Use TensorFlow ops (`tf.cond`, `tf.while_loop`) |
+| **Dynamic shapes** | Wrong output shapes | Specify `input_signature` explicitly |
 
 ---
 
 ## Next Steps
 
-- **Design Document:** Read [LiteRT_Export_Design.md](./LiteRT_Export_Design.md) for technical details
 - **Examples:** Check `keras-hub/examples/` for complete examples
 - **API Reference:** See [keras.io](https://keras.io) for full API documentation
 - **Community:** Join [Keras Discord](https://discord.gg/keras) for support
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** November 13, 2025  
+**Document Version:** 2.0  
+**Last Updated:** 2025  
 **Feedback:** [GitHub Issues](https://github.com/keras-team/keras/issues)
